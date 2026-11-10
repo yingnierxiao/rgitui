@@ -1022,7 +1022,17 @@ fn gather_refresh_data_internal(
             worktree_discovery_started.elapsed()
         );
         let mut worktree_status_handles = Vec::new();
-        let non_current_worktree_count = worktrees.iter().filter(|wt| !wt.is_current).count();
+        let non_current_worktree_count = worktrees
+            .iter()
+            .filter(|wt| {
+                !wt.is_current
+                    && should_scan_worktree_status(
+                        watch_all_worktrees,
+                        inspected_worktree.as_deref(),
+                        &wt.path,
+                    )
+            })
+            .count();
         log::info!(
             "refresh timing: scanning {} non-current worktrees for file status",
             non_current_worktree_count
