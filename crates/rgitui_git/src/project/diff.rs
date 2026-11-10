@@ -18,9 +18,10 @@ pub(crate) fn batch_diff_stats(
     let batch_timer = std::time::Instant::now();
     log::debug!("batch_diff_stats: staged={}", staged);
     let mut opts = DiffOptions::new();
-    opts.include_untracked(true);
-    opts.show_untracked_content(true);
-    opts.recurse_untracked_dirs(true);
+    // Untracked files/directories are represented by status rows and expanded
+    // separately. Including them here would recursively walk large directories
+    // just to compute optional line counts.
+    opts.include_untracked(false);
     let diff_result = if staged {
         let head_tree = repo.head().ok().and_then(|r| r.peel_to_tree().ok());
         repo.diff_tree_to_index(head_tree.as_ref(), None, Some(&mut opts))
