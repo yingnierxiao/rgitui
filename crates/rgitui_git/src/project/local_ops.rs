@@ -334,6 +334,7 @@ impl GitProject {
                         }
                         index.write()?;
                     }
+                    worktree_cache.mark_worktree_status_dirty(&worktree_path);
                     gather_refresh_data_lightweight_cached(
                         &refresh_repo_path,
                         commit_limit,
@@ -432,6 +433,7 @@ impl GitProject {
                         Some(&mut skip_conflicts),
                     )?;
                     index.write()?;
+                    worktree_cache.mark_worktree_status_dirty(&worktree_path);
                     gather_refresh_data_lightweight_cached(
                         &refresh_repo_path,
                         commit_limit,
@@ -508,6 +510,7 @@ impl GitProject {
                         let obj = head.peel(git2::ObjectType::Any)?;
                         repo.reset(&obj, git2::ResetType::Mixed, None)?;
                     }
+                    worktree_cache.mark_worktree_status_dirty(&worktree_path);
                     gather_refresh_data_lightweight_cached(
                         &refresh_repo_path,
                         commit_limit,
@@ -1834,6 +1837,7 @@ impl GitProject {
                     if has_tracked {
                         repo.checkout_head(Some(&mut checkout_opts))?;
                     }
+                    worktree_cache.mark_worktree_status_dirty(&worktree_path);
                     let data = gather_refresh_data_lightweight_cached(
                         &refresh_repo_path,
                         commit_limit,
