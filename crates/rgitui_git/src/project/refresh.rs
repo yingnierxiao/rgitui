@@ -1062,6 +1062,8 @@ fn gather_refresh_data_internal(
     author_filter: Option<&str>,
 ) -> Result<RefreshData> {
     let worktree_cache = refresh_caches.map(|caches| &caches.worktree_status);
+    let status_refresh_epoch = refresh_caches.map(RefreshCaches::status_refresh_epoch);
+    let status_cache_updated = refresh_caches.is_some();
     let inspected_worktree = refresh_caches.and_then(RefreshCaches::inspected_worktree);
     let watch_all_worktrees = refresh_caches.is_some_and(RefreshCaches::watch_all_worktrees);
     let commit_limit = normalize_commit_limit(commit_limit);
@@ -1405,7 +1407,49 @@ fn gather_refresh_data_internal(
                     .map(str::to_owned)
             }),
         current_user_email,
+        status_cache_updated,
+        status_refresh_epoch,
     })
+}
+
+/// List the files inside a collapsed untracked-directory placeholder. This is
+/// deliberately a path-scoped Git query: the initial status refresh reports one
+/// directory row, and only expanding that row enumerates its contents.
+pub fn list_untracked_files_at(repo_path: &Path, directory: &Path) -> Result<Vec<FileStatus>> {
+    use std::path::Component;
+
+    if directory.is_absolute()
+        || directory
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
+    {
+        anyhow::bail!("Untracked directory must be a repository-relative path");
+    }
+
+    let output = git_command()
+        .current_dir(repo_path)
+        .args(["ls-files", "--others", "--exclude-standard", "-z", "--"])
+        .arg(directory)
+        .output()
+        .with_context(|| "Failed to enumerate untracked directory contents")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git ls-files failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(|path| FileStatus {
+            path: PathBuf::from(path),
+            kind: FileChangeKind::Untracked,
+            old_path: None,
+            additions: 0,
+            deletions: 0,
+        })
+        .collect())
 }
 
 /// Run `git log` for the commit list a refresh shows.
