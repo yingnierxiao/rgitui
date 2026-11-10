@@ -246,7 +246,7 @@ impl IgnoreRepos {
         };
         self.repos
             .iter()
-            .find(|(root, _)| *root == owner)
+            .find(|(root, _)| root == &owner)
             .is_some_and(|(root, repo)| match path.strip_prefix(root) {
                 Ok(relative) if relative.as_os_str().is_empty() => false,
                 // A workdir-relative path sidesteps libgit2's absolute-path

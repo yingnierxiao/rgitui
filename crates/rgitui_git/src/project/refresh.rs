@@ -670,10 +670,9 @@ fn mix_file_contents(hasher: &mut DefaultHasher, path: &Path, len: u64) {
 /// uses its own stat cache for `statuses()`, and the additional `metadata()`
 /// calls are only for files already flagged as workdir-modified.
 ///
-/// With `line_stats`, untracked files are sampled the same way: one stays
-/// untracked however it is edited, so its contents are all that separate one
-/// line count from the next. Without it they are skipped, since nothing
-/// reported for an untracked file depends on what is inside it.
+/// Untracked entries do not contribute line counts. Their paths and status
+/// flags are sufficient for the file list; directory contents are enumerated
+/// only when the user expands an untracked-directory placeholder.
 fn status_fingerprint(repo_path: &Path, statuses: &git2::Statuses<'_>, line_stats: bool) -> u64 {
     let mut hasher = DefaultHasher::new();
     // A status cached without line counts must not be served once they are
@@ -681,9 +680,6 @@ fn status_fingerprint(repo_path: &Path, statuses: &git2::Statuses<'_>, line_stat
     line_stats.hash(&mut hasher);
     let mut read_from_disk =
         git2::Status::WT_MODIFIED | git2::Status::WT_RENAMED | git2::Status::WT_TYPECHANGE;
-    if line_stats {
-        read_from_disk |= git2::Status::WT_NEW;
-    }
     for entry in statuses.iter() {
         let path = entry.path().unwrap_or("");
         path.hash(&mut hasher);
@@ -2788,6 +2784,24 @@ mod working_tree_status_tests {
             inactive
         ));
         assert!(!should_compute_line_stats(false, true, None, current));
+    }
+
+    #[test]
+    fn untracked_directories_are_reported_as_placeholders_and_expand_on_demand() {
+        let fixture = TempRepo::init();
+        let nested = fixture.path().join("assets").join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(fixture.path().join("assets").join("root.txt"), "root\n").unwrap();
+        std::fs::write(nested.join("nested.txt"), "nested\n").unwrap();
+
+        let status = compute_working_tree_status(fixture.path(), None, false).unwrap();
+        assert_eq!(status.unstaged.len(), 1);
+        assert_eq!(status.unstaged[0].path, Path::new("assets"));
+        assert_eq!(status.unstaged[0].kind, FileChangeKind::UntrackedDirectory);
+
+        let expanded = list_untracked_files_at(fixture.path(), Path::new("assets")).unwrap();
+        assert_eq!(expanded.len(), 2);
+        assert!(expanded.iter().all(|file| file.kind == FileChangeKind::Untracked));
     }
 
     #[test]

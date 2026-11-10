@@ -1178,7 +1178,12 @@ impl Sidebar {
         if children.is_empty() {
             self.unstaged.remove(index);
         } else {
-            self.unstaged.splice(index..=index, children);
+            drop(self.unstaged.splice(index..=index, children));
+        }
+        if self.selected_file.as_ref().is_some_and(|(selected, staged)| {
+            !*staged && PathBuf::from(selected) == directory
+        }) {
+            self.selected_file = None;
         }
         self.rebuild_change_trees();
         self.rebuild_flattened_branches();
