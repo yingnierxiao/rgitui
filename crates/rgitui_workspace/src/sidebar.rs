@@ -57,6 +57,8 @@ pub enum SidebarEvent {
         path: String,
         staged: bool,
     },
+    /// Expand an untracked-directory placeholder into its file entries.
+    ExpandUntrackedDirectory(String),
     StageFile(String),
     UnstageFile(String),
     StageAll,
@@ -1160,6 +1162,30 @@ impl Sidebar {
         }
     }
 
+    pub fn expand_untracked_directory(
+        &mut self,
+        directory: &str,
+        children: Vec<FileStatus>,
+        cx: &mut Context<Self>,
+    ) {
+        let directory = PathBuf::from(directory);
+        let Some(index) = self.unstaged.iter().position(|file| {
+            file.kind == FileChangeKind::UntrackedDirectory && file.path == directory
+        }) else {
+            return;
+        };
+
+        if children.is_empty() {
+            self.unstaged.remove(index);
+        } else {
+            self.unstaged.splice(index..=index, children);
+        }
+        self.rebuild_change_trees();
+        self.rebuild_flattened_branches();
+        self.rebuild_nav_items();
+        cx.notify();
+    }
+
     pub fn update_status(
         &mut self,
         staged: Vec<FileStatus>,
@@ -1326,7 +1352,7 @@ impl Sidebar {
             FileChangeKind::Renamed => Color::Renamed,
             FileChangeKind::Copied => Color::Info,
             FileChangeKind::TypeChange => Color::Warning,
-            FileChangeKind::Untracked => Color::Untracked,
+            FileChangeKind::Untracked | FileChangeKind::UntrackedDirectory => Color::Untracked,
             FileChangeKind::Conflicted => Color::Conflict,
         }
     }
@@ -1334,6 +1360,8 @@ impl Sidebar {
     fn file_selection_event(path: String, staged: bool, kind: FileChangeKind) -> SidebarEvent {
         if !staged && kind == FileChangeKind::Conflicted {
             SidebarEvent::ConflictFileSelected(path)
+        } else if !staged && kind == FileChangeKind::UntrackedDirectory {
+            SidebarEvent::ExpandUntrackedDirectory(path)
         } else {
             SidebarEvent::FileSelected { path, staged }
         }
@@ -1343,7 +1371,7 @@ impl Sidebar {
     /// changes use the same high-contrast semantic color as their status icon.
     fn file_name_color(kind: FileChangeKind) -> Color {
         match kind {
-            FileChangeKind::Untracked => Color::Muted,
+            FileChangeKind::Untracked | FileChangeKind::UntrackedDirectory => Color::Muted,
             tracked => Self::file_change_color(tracked),
         }
     }
@@ -1358,6 +1386,7 @@ impl Sidebar {
             FileChangeKind::Copied => "Copied",
             FileChangeKind::TypeChange => "Type-changed",
             FileChangeKind::Untracked => "Untracked",
+            FileChangeKind::UntrackedDirectory => "Untracked directory",
             FileChangeKind::Conflicted => "Conflicted",
         }
     }
@@ -1429,6 +1458,7 @@ impl Sidebar {
             FileChangeKind::Copied => "C",
             FileChangeKind::TypeChange => "T",
             FileChangeKind::Untracked => "?",
+            FileChangeKind::UntrackedDirectory => "▸",
             FileChangeKind::Conflicted => "!",
         }
     }
@@ -3737,6 +3767,7 @@ impl Render for Sidebar {
                 FileChangeKind::Copied,
                 FileChangeKind::TypeChange,
                 FileChangeKind::Untracked,
+                FileChangeKind::UntrackedDirectory,
                 FileChangeKind::Conflicted,
             ];
             let mut breakdown = div().h_flex().gap(px(4.));
@@ -4073,6 +4104,7 @@ impl Render for Sidebar {
                 FileChangeKind::Copied,
                 FileChangeKind::TypeChange,
                 FileChangeKind::Untracked,
+                FileChangeKind::UntrackedDirectory,
                 FileChangeKind::Conflicted,
             ];
             let mut breakdown = div().h_flex().gap(px(4.));
@@ -4877,6 +4909,7 @@ mod tests {
         assert_eq!(Sidebar::file_change_symbol(FileChangeKind::Copied), "C");
         assert_eq!(Sidebar::file_change_symbol(FileChangeKind::TypeChange), "T");
         assert_eq!(Sidebar::file_change_symbol(FileChangeKind::Untracked), "?");
+        assert_eq!(Sidebar::file_change_symbol(FileChangeKind::UntrackedDirectory), "▸");
         assert_eq!(Sidebar::file_change_symbol(FileChangeKind::Conflicted), "!");
     }
 
@@ -4889,6 +4922,14 @@ mod tests {
                 FileChangeKind::Conflicted,
             ),
             SidebarEvent::ConflictFileSelected("src/conflicted.rs".to_string())
+        );
+        assert_eq!(
+            Sidebar::file_selection_event(
+                "assets".to_string(),
+                false,
+                FileChangeKind::UntrackedDirectory,
+            ),
+            SidebarEvent::ExpandUntrackedDirectory("assets".to_string())
         );
     }
 
