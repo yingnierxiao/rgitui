@@ -235,14 +235,18 @@ impl IgnoreRepos {
         !paths.is_empty() && paths.iter().all(|path| self.is_ignored(path))
     }
 
+    fn owner_for_path(&self, path: &Path) -> Option<PathBuf> {
+        owning_root(self.repos.iter().map(|(root, _)| root.as_path()), path)
+            .map(Path::to_path_buf)
+    }
+
     fn is_ignored(&self, path: &Path) -> bool {
-        let Some(owner) = owning_root(self.repos.iter().map(|(root, _)| root.as_path()), path)
-        else {
+        let Some(owner) = self.owner_for_path(path) else {
             return false;
         };
         self.repos
             .iter()
-            .find(|(root, _)| root == owner)
+            .find(|(root, _)| *root == owner)
             .is_some_and(|(root, repo)| match path.strip_prefix(root) {
                 Ok(relative) if relative.as_os_str().is_empty() => false,
                 // A workdir-relative path sidesteps libgit2's absolute-path
@@ -305,6 +309,8 @@ impl GitProject {
             let dirty_flag = dirty.clone();
             let git_dirty_flag = git_dirty.clone();
             let callback_ignore_repos = ignore_repos.clone();
+            let callback_status_cache = worktree_cache.clone();
+            let callback_main_root = repo_path.clone();
             let watcher =
                 notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
                     if let Ok(event) = res {
@@ -326,15 +332,32 @@ impl GitProject {
                         // (e.g. `target/`, `node_modules/`). Tracked files —
                         // even modified ones — are never reported as ignored,
                         // so legitimate changes still pass through.
-                        if let Ok(repos) = callback_ignore_repos.lock() {
+                        let dirty_roots = if let Ok(repos) = callback_ignore_repos.lock() {
                             if repos.all_ignored(&event.paths) {
                                 return;
                             }
-                        }
+                            event
+                                .paths
+                                .iter()
+                                .filter_map(|path| repos.owner_for_path(path))
+                                .collect::<HashSet<_>>()
+                        } else {
+                            HashSet::new()
+                        };
                         match event.kind {
                             notify::EventKind::Create(_)
                             | notify::EventKind::Modify(_)
                             | notify::EventKind::Remove(_) => {
+                                if dirty_roots.is_empty() {
+                                    // Unknown paths are conservatively attributed
+                                    // to the main checkout rather than dropped.
+                                    callback_status_cache
+                                        .mark_worktree_status_dirty(&callback_main_root);
+                                } else {
+                                    for root in dirty_roots {
+                                        callback_status_cache.mark_worktree_status_dirty(&root);
+                                    }
+                                }
                                 dirty_flag.store(true, Ordering::Relaxed);
                             }
                             _ => {}
@@ -499,6 +522,9 @@ impl GitProject {
                                     repos.add(root);
                                 }
                             }
+                            for root in desired.difference(&current) {
+                                worktree_cache.mark_worktree_status_dirty(root);
+                            }
                         }
                         changed
                     };
@@ -547,7 +573,26 @@ impl GitProject {
 
                     if fingerprint_changed {
                         log::debug!("watcher: git state changed, scheduling refresh");
+                        worktree_cache.mark_worktree_status_dirty(&repo_path);
+                        for root in &desired {
+                            worktree_cache.mark_worktree_status_dirty(root);
+                        }
                         dirty.store(true, Ordering::Relaxed);
+                    }
+
+                    // An explicit operation refresh (Pull, Checkout, Stage, etc.)
+                    // may already have applied a snapshot that covers these events.
+                    if dirty.load(Ordering::Relaxed)
+                        && !worktree_cache.has_unapplied_status_refresh()
+                    {
+                        dirty.store(false, Ordering::Relaxed);
+                    }
+
+                    // Do not race a watcher refresh against an explicit operation.
+                    // The operation applies its own post-mutation snapshot; events
+                    // remain queued and are coalesced by the status epoch below.
+                    if worktree_cache.has_active_operations() {
+                        continue;
                     }
 
                     if dirty.swap(false, Ordering::Relaxed) {
@@ -601,7 +646,7 @@ impl GitProject {
                                         generation,
                                         this.refresh_generation()
                                     );
-                                    return false;
+                                    return this.refresh_caches.has_unapplied_status_refresh();
                                 }
 
                                 // Ahead/behind survives this apply through
@@ -632,10 +677,15 @@ impl GitProject {
 
                         match result {
                             Ok(true) => {}
-                            // The lightweight result was dropped as stale; re-arm
-                            // so the next poll tick reapplies against the current
-                            // generation.
-                            Ok(false) => dirty.store(true, Ordering::Relaxed),
+                            // The lightweight result was dropped as stale. Re-arm
+                            // only when a newer event arrived after the refresh that
+                            // superseded it; otherwise the operation refresh covered it.
+                            Ok(false) => {
+                                dirty.store(
+                                    worktree_cache.has_unapplied_status_refresh(),
+                                    Ordering::Relaxed,
+                                )
+                            },
                             // Entity released (or app shutting down): end the loop.
                             Err(_) => break,
                         }
