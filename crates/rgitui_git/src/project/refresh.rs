@@ -29,6 +29,10 @@ pub(super) type WorktreeStatusCache = HashMap<PathBuf, (u64, WorkingTreeStatus)>
 #[derive(Default)]
 pub(super) struct RefreshCaches {
     pub worktree_status: Mutex<WorktreeStatusCache>,
+    /// The linked worktree currently inspected by the UI. Line counts are
+    /// expensive and are only computed for this checkout, or the main checkout
+    /// when no linked worktree is being inspected.
+    inspected_worktree: Mutex<Option<PathBuf>>,
     commit_log: Mutex<Option<CommitLogEntry>>,
 }
 
@@ -46,6 +50,23 @@ struct CommitLogEntry {
 }
 
 impl RefreshCaches {
+    /// Record which linked worktree the UI is inspecting. Refreshes use this to
+    /// avoid diffing every inactive checkout just to populate line counts.
+    pub(super) fn set_inspected_worktree(&self, path: Option<PathBuf>) {
+        *self
+            .inspected_worktree
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = path;
+    }
+
+    /// Snapshot the worktree currently inspected by the UI.
+    fn inspected_worktree(&self) -> Option<PathBuf> {
+        self.inspected_worktree
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     /// The commits the last refresh loaded, if they were loaded under `key`
     /// and are still the list the project shows.
     fn reusable_commit_log(&self, key: u64) -> Option<(Arc<Vec<CommitInfo>>, bool)> {
@@ -532,6 +553,18 @@ fn status_fingerprint(repo_path: &Path, statuses: &git2::Statuses<'_>, line_stat
 /// `line_stats` controls whether each file's added and removed line counts are
 /// computed. That diffs every changed file, so it is skipped unless the counts
 /// are shown; without it every `FileStatus` reports zero for both.
+/// Line-count diffs are only useful for the checkout the user is looking at.
+/// Keep them out of refreshes for inactive worktrees, which can contain tens of
+/// thousands of changed files.
+fn should_compute_line_stats(
+    enabled: bool,
+    is_current: bool,
+    inspected_worktree: Option<&Path>,
+    worktree_path: &Path,
+) -> bool {
+    enabled && (is_current || inspected_worktree == Some(worktree_path))
+}
+
 fn compute_working_tree_status(
     repo_path: &Path,
     cache: Option<&Mutex<WorktreeStatusCache>>,
@@ -777,6 +810,7 @@ fn gather_refresh_data_internal(
     author_filter: Option<&str>,
 ) -> Result<RefreshData> {
     let worktree_cache = refresh_caches.map(|caches| &caches.worktree_status);
+    let inspected_worktree = refresh_caches.and_then(RefreshCaches::inspected_worktree);
     let commit_limit = normalize_commit_limit(commit_limit);
     let refresh_timer = std::time::Instant::now();
     let repo = Repository::open(repo_path)
@@ -917,11 +951,18 @@ fn gather_refresh_data_internal(
     // Run status, stashes, worktrees in parallel; scoped threads for the same
     // reason as in `compute_working_tree_status`. Status and stashes open their
     // own repos, while worktrees and the revwalk share `&repo`.
-    let line_stats = rgitui_settings::change_line_stats_enabled();
+    let line_stats_enabled = rgitui_settings::change_line_stats_enabled();
+    let current_line_stats = should_compute_line_stats(
+        line_stats_enabled,
+        true,
+        inspected_worktree.as_deref(),
+        repo_path,
+    );
     let status_started = std::time::Instant::now();
     let (status, stashes, worktrees) = std::thread::scope(|s| {
-        let status_handle =
-            s.spawn(|| compute_working_tree_status(repo_path, worktree_cache, line_stats));
+        let status_handle = s.spawn(|| {
+            compute_working_tree_status(repo_path, worktree_cache, current_line_stats)
+        });
 
         let stash_handle = s.spawn(|| {
             let stash_started = std::time::Instant::now();
@@ -962,10 +1003,20 @@ fn gather_refresh_data_internal(
                 continue;
             }
             let worktree_path = worktree.path.clone();
+            let worktree_line_stats = should_compute_line_stats(
+                line_stats_enabled,
+                false,
+                inspected_worktree.as_deref(),
+                &worktree_path,
+            );
             worktree_status_handles.push((
                 idx,
                 s.spawn(move || {
-                    compute_working_tree_status(&worktree_path, worktree_cache, line_stats)
+                    compute_working_tree_status(
+                        &worktree_path,
+                        worktree_cache,
+                        worktree_line_stats,
+                    )
                 }),
             ));
         }
@@ -2396,6 +2447,22 @@ mod working_tree_status_tests {
             .iter()
             .map(|file| (file.additions, file.deletions))
             .collect()
+    }
+
+    #[test]
+    fn line_counts_are_only_computed_for_the_current_or_inspected_worktree() {
+        let current = Path::new("repo");
+        let inactive = Path::new("repo/worktrees/inactive");
+
+        assert!(should_compute_line_stats(true, true, None, current));
+        assert!(!should_compute_line_stats(true, false, None, inactive));
+        assert!(should_compute_line_stats(
+            true,
+            false,
+            Some(inactive),
+            inactive
+        ));
+        assert!(!should_compute_line_stats(false, true, None, current));
     }
 
     #[test]
