@@ -4,6 +4,7 @@ use git2::{Repository, StatusOptions};
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use crate::types::*;
@@ -20,10 +21,91 @@ pub(super) fn normalize_commit_limit(limit: usize) -> usize {
     limit.clamp(1, MAX_COMMIT_LIMIT)
 }
 
-/// Per-worktree status cache: maps the worktree path to a (fingerprint, status) pair.
-/// The fingerprint is derived from `repo.statuses()` output so it reflects both index
-/// and working-tree changes, not just `.git` sentinel file mtimes.
-pub(super) type WorktreeStatusCache = HashMap<PathBuf, (u64, WorkingTreeStatus)>;
+/// A cached status snapshot is reusable only while its invalidation generation and
+/// line-count setting still match. The generation is advanced by filesystem/Git
+/// watcher events, explicit operations, and worktree inspection changes.
+#[derive(Clone)]
+struct WorktreeStatusCacheEntry {
+    generation: u64,
+    line_stats: bool,
+    fingerprint: u64,
+    status: WorkingTreeStatus,
+}
+
+#[derive(Default)]
+pub(super) struct WorktreeStatusCache {
+    entries: HashMap<PathBuf, WorktreeStatusCacheEntry>,
+    generations: HashMap<PathBuf, u64>,
+}
+
+impl WorktreeStatusCache {
+    pub(super) fn new() -> Self {
+        Self::default()
+    }
+
+    fn generation(&self, path: &Path) -> u64 {
+        self.generations.get(path).copied().unwrap_or(0)
+    }
+
+    fn cached_if_clean(&self, path: &Path, line_stats: bool) -> Option<WorkingTreeStatus> {
+        let generation = self.generation(path);
+        self.entries
+            .get(path)
+            .filter(|entry| entry.generation == generation && entry.line_stats == line_stats)
+            .map(|entry| entry.status.clone())
+    }
+
+    fn cached_if_fingerprint_matches(
+        &mut self,
+        path: &Path,
+        generation: u64,
+        line_stats: bool,
+        fingerprint: u64,
+    ) -> Option<WorkingTreeStatus> {
+        let entry = self.entries.get_mut(path)?;
+        if entry.line_stats != line_stats || entry.fingerprint != fingerprint {
+            return None;
+        }
+        entry.generation = generation;
+        Some(entry.status.clone())
+    }
+
+    fn insert(
+        &mut self,
+        path: PathBuf,
+        generation: u64,
+        line_stats: bool,
+        fingerprint: u64,
+        status: WorkingTreeStatus,
+    ) {
+        self.entries.insert(
+            path,
+            WorktreeStatusCacheEntry {
+                generation,
+                line_stats,
+                fingerprint,
+                status,
+            },
+        );
+    }
+
+    fn mark_dirty(&mut self, path: &Path) {
+        let generation = self.generations.entry(path.to_path_buf()).or_default();
+        *generation = generation.wrapping_add(1);
+    }
+
+    fn mark_all_dirty(&mut self) {
+        let paths = self.entries.keys().cloned().collect::<Vec<_>>();
+        for path in paths {
+            self.mark_dirty(&path);
+        }
+    }
+
+    #[cfg(test)]
+    fn fingerprint(&self, path: &Path) -> Option<u64> {
+        self.entries.get(path).map(|entry| entry.fingerprint)
+    }
+}
 
 /// What a project's refreshes carry from one to the next.
 #[derive(Default)]
@@ -35,6 +117,12 @@ pub(super) struct RefreshCaches {
     inspected_worktree: Mutex<Option<PathBuf>>,
     /// Whether the user explicitly asked to monitor every linked worktree.
     watch_all_worktrees: Mutex<bool>,
+    /// Monotonic invalidation epoch for status refresh requests. The watcher uses
+    /// it to tell whether a newer operation refresh already covered its events.
+    status_refresh_epoch: AtomicU64,
+    applied_status_refresh_epoch: AtomicU64,
+    /// Prevents the watcher from racing expensive refreshes started by Git operations.
+    active_operations: AtomicUsize,
     commit_log: Mutex<Option<CommitLogEntry>>,
 }
 
@@ -55,10 +143,68 @@ impl RefreshCaches {
     /// Record which linked worktree the UI is inspecting. Refreshes use this to
     /// avoid diffing every inactive checkout just to populate line counts.
     pub(super) fn set_inspected_worktree(&self, path: Option<PathBuf>) {
-        *self
+        let mut inspected = self
             .inspected_worktree
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = path;
+            .unwrap_or_else(|e| e.into_inner());
+        if *inspected != path {
+            if let Some(path) = path.as_deref() {
+                self.mark_worktree_status_dirty(path);
+            }
+            *inspected = path;
+        }
+    }
+
+    pub(super) fn mark_worktree_status_dirty(&self, path: &Path) {
+        self.worktree_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .mark_dirty(path);
+        self.status_refresh_epoch.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(super) fn mark_all_worktree_status_dirty(&self) {
+        self.worktree_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .mark_all_dirty();
+        self.status_refresh_epoch.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(super) fn invalidate_all_status_cache(&self) {
+        self.worktree_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .mark_all_dirty();
+    }
+
+    pub(super) fn status_refresh_epoch(&self) -> u64 {
+        self.status_refresh_epoch.load(Ordering::Acquire)
+    }
+
+    pub(super) fn mark_status_refresh_applied(&self, epoch: u64) {
+        self.applied_status_refresh_epoch
+            .fetch_max(epoch, Ordering::AcqRel);
+    }
+
+    pub(super) fn has_unapplied_status_refresh(&self) -> bool {
+        self.status_refresh_epoch() > self.applied_status_refresh_epoch.load(Ordering::Acquire)
+    }
+
+    pub(super) fn begin_operation(&self) {
+        self.active_operations.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(super) fn finish_operation(&self) {
+        let _ = self.active_operations.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |count| Some(count.saturating_sub(1)),
+        );
+    }
+
+    pub(super) fn has_active_operations(&self) -> bool {
+        self.active_operations.load(Ordering::Acquire) > 0
     }
 
     /// Snapshot the worktree currently inspected by the UI.
