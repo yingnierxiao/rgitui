@@ -393,6 +393,9 @@ impl GitProject {
                     // Use the same caches as watcher refreshes and defer graph walks.
                     // The old full refresh performed libgit2 ahead/behind walks for
                     // every local branch before the Pull operation could complete.
+                    // Pull may rewrite the checked-out files and index without
+                    // relying on the filesystem watcher to deliver every event.
+                    refresh_caches.mark_worktree_status_dirty(&task_worktree_path);
                     let refresh_started = std::time::Instant::now();
                     let refresh_result = gather_refresh_data_lightweight_cached(
                         &repo_path,
