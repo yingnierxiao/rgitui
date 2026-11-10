@@ -1181,7 +1181,7 @@ impl Sidebar {
             drop(self.unstaged.splice(index..=index, children));
         }
         if self.selected_file.as_ref().is_some_and(|(selected, staged)| {
-            !*staged && PathBuf::from(selected) == directory
+            !*staged && PathBuf::from(selected.as_str()) == directory
         }) {
             self.selected_file = None;
         }

@@ -163,14 +163,6 @@ impl RefreshCaches {
         self.status_refresh_epoch.fetch_add(1, Ordering::AcqRel);
     }
 
-    pub(super) fn mark_all_worktree_status_dirty(&self) {
-        self.worktree_status
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .mark_all_dirty();
-        self.status_refresh_epoch.fetch_add(1, Ordering::AcqRel);
-    }
-
     pub(super) fn invalidate_all_status_cache(&self) {
         self.worktree_status
             .lock()

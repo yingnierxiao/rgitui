@@ -240,6 +240,10 @@ impl IgnoreRepos {
             .map(Path::to_path_buf)
     }
 
+    fn roots(&self) -> Vec<PathBuf> {
+        self.repos.iter().map(|(root, _)| root.clone()).collect()
+    }
+
     fn is_ignored(&self, path: &Path) -> bool {
         let Some(owner) = self.owner_for_path(path) else {
             return false;
@@ -326,6 +330,18 @@ impl GitProject {
                             .all(|p| p.components().any(|c| c.as_os_str() == ".git"));
                         if dominated_by_git {
                             git_dirty_flag.store(true, Ordering::Relaxed);
+                            // Git metadata can change status semantics even when
+                            // the ref/index fingerprint is unchanged (for example
+                            // core.excludesFile or .git/info/exclude). Invalidate
+                            // every currently watched checkout and queue a refresh.
+                            let roots = callback_ignore_repos
+                                .lock()
+                                .map(|repos| repos.roots())
+                                .unwrap_or_else(|_| vec![callback_main_root.clone()]);
+                            for root in roots {
+                                callback_status_cache.mark_worktree_status_dirty(&root);
+                            }
+                            dirty_flag.store(true, Ordering::Relaxed);
                             return;
                         }
                         // Skip events where every changed path is gitignored
