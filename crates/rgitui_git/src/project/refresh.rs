@@ -745,6 +745,23 @@ fn compute_working_tree_status(
     line_stats: bool,
 ) -> Result<WorkingTreeStatus> {
     let total_started = std::time::Instant::now();
+    let cache_generation = if let Some(cache) = cache {
+        let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        let generation = guard.generation(repo_path);
+        if let Some(status) = guard.cached_if_clean(repo_path, line_stats) {
+            log::info!(
+                "worktree status timing: path={} open=skipped git_status=skipped cache=clean line_stats={} total={:?}",
+                repo_path.display(),
+                line_stats,
+                total_started.elapsed()
+            );
+            return Ok(status);
+        }
+        Some(generation)
+    } else {
+        None
+    };
+
     let repo_open_started = std::time::Instant::now();
     let repo = Repository::open(repo_path)?;
     let repo_open_elapsed = repo_open_started.elapsed();
@@ -752,7 +769,7 @@ fn compute_working_tree_status(
 
     let mut opts = StatusOptions::new();
     opts.include_untracked(true)
-        .recurse_untracked_dirs(true)
+        .recurse_untracked_dirs(false)
         .include_unmodified(false);
 
     let git_status_started = std::time::Instant::now();
@@ -760,55 +777,101 @@ fn compute_working_tree_status(
     let git_status_elapsed = git_status_started.elapsed();
     let status_entry_count = statuses.len();
 
-    // Compute fingerprint once; used for both the cache read and the cache write.
+    // Compute the fingerprint only after a watcher/operation invalidated the
+    // cached generation. A false-positive event can still reuse the old status.
     let fingerprint_started = std::time::Instant::now();
     let fingerprint = cache.map(|_| status_fingerprint(repo_path, &statuses, line_stats));
     let fingerprint_elapsed = fingerprint_started.elapsed();
 
-    if let (Some(fp), Some(c)) = (fingerprint, cache) {
-        let guard = c.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((cached_fp, cached_status)) = guard.get(repo_path) {
-            if *cached_fp == fp {
-                log::info!(
-                    "worktree status timing: path={} open={:?} git_status={:?} entries={} fingerprint={:?} cache=hit total={:?}",
-                    repo_path.display(),
-                    repo_open_elapsed,
-                    git_status_elapsed,
-                    status_entry_count,
-                    fingerprint_elapsed,
-                    total_started.elapsed()
-                );
-                return Ok(cached_status.clone());
-            }
+    if let (Some(fp), Some(cache), Some(generation)) = (fingerprint, cache, cache_generation) {
+        let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(cached_status) =
+            guard.cached_if_fingerprint_matches(repo_path, generation, line_stats, fp)
+        {
+            log::info!(
+                "worktree status timing: path={} open={:?} git_status={:?} entries={} fingerprint={:?} cache=hit total={:?}",
+                repo_path.display(),
+                repo_open_elapsed,
+                git_status_elapsed,
+                status_entry_count,
+                fingerprint_elapsed,
+                total_started.elapsed()
+            );
+            return Ok(cached_status);
         }
     }
 
-    // Scoped OS threads rather than the executor: this whole function already
-    // runs on a background thread and borrows `repo_path`, so a scope keeps the
-    // borrow and costs two thread spawns, where routing through the executor
-    // would make every gather function async up to its call sites.
-    let (staged_stats, unstaged_stats) = if line_stats {
-        std::thread::scope(|s| {
-            let staged_handle = s.spawn(|| {
-                let repo = Repository::open(repo_path).ok();
-                repo.as_ref()
-                    .map(|r| batch_diff_stats(r, true))
-                    .unwrap_or_default()
-            });
-            let unstaged_handle = s.spawn(|| {
-                let repo = Repository::open(repo_path).ok();
-                repo.as_ref()
-                    .map(|r| batch_diff_stats(r, false))
-                    .unwrap_or_default()
-            });
+    let has_staged_changes = statuses.iter().any(|entry| {
+        entry.status().intersects(
+            git2::Status::INDEX_NEW
+                | git2::Status::INDEX_MODIFIED
+                | git2::Status::INDEX_DELETED
+                | git2::Status::INDEX_RENAMED
+                | git2::Status::INDEX_TYPECHANGE,
+        )
+    });
+    let has_unstaged_changes = statuses.iter().any(|entry| {
+        entry.status().intersects(
+            git2::Status::WT_MODIFIED
+                | git2::Status::WT_DELETED
+                | git2::Status::WT_RENAMED
+                | git2::Status::WT_TYPECHANGE,
+        )
+    });
+
+    // Never build two whole-repository diffs for a clean status. Untracked
+    // directory placeholders are expanded only when the user opens that folder.
+    let (staged_stats, unstaged_stats, staged_diff_elapsed, unstaged_diff_elapsed) =
+        if line_stats && (has_staged_changes || has_unstaged_changes) {
+            std::thread::scope(|s| {
+                let staged_handle = has_staged_changes.then(|| {
+                    s.spawn(|| {
+                        let started = std::time::Instant::now();
+                        let repo = Repository::open(repo_path).ok();
+                        let stats = repo
+                            .as_ref()
+                            .map(|r| batch_diff_stats(r, true))
+                            .unwrap_or_default();
+                        (stats, started.elapsed())
+                    })
+                });
+                let unstaged_handle = has_unstaged_changes.then(|| {
+                    s.spawn(|| {
+                        let started = std::time::Instant::now();
+                        let repo = Repository::open(repo_path).ok();
+                        let stats = repo
+                            .as_ref()
+                            .map(|r| batch_diff_stats(r, false))
+                            .unwrap_or_default();
+                        (stats, started.elapsed())
+                    })
+                });
+                let (staged, staged_elapsed) = staged_handle
+                    .map(|handle| handle.join().unwrap_or_default())
+                    .unwrap_or_default();
+                let (unstaged, unstaged_elapsed) = unstaged_handle
+                    .map(|handle| handle.join().unwrap_or_default())
+                    .unwrap_or_default();
+                (staged, unstaged, staged_elapsed, unstaged_elapsed)
+            })
+        } else {
             (
-                staged_handle.join().unwrap_or_default(),
-                unstaged_handle.join().unwrap_or_default(),
+                HashMap::new(),
+                HashMap::new(),
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
             )
-        })
-    } else {
-        Default::default()
-    };
+        };
+    if line_stats {
+        log::info!(
+            "diff stats timing: path={} staged={:?} unstaged={:?} staged_needed={} unstaged_needed={}",
+            repo_path.display(),
+            staged_diff_elapsed,
+            unstaged_diff_elapsed,
+            has_staged_changes,
+            has_unstaged_changes
+        );
+    }
 
     let convert_started = std::time::Instant::now();
     for entry in statuses.iter() {
@@ -851,7 +914,15 @@ fn compute_working_tree_status(
                 | git2::Status::WT_TYPECHANGE,
         ) {
             let kind = if st.contains(git2::Status::WT_NEW) {
-                FileChangeKind::Untracked
+                let is_directory = repo_path
+                    .join(&path)
+                    .symlink_metadata()
+                    .is_ok_and(|metadata| metadata.file_type().is_dir());
+                if is_directory {
+                    FileChangeKind::UntrackedDirectory
+                } else {
+                    FileChangeKind::Untracked
+                }
             } else if st.contains(git2::Status::WT_MODIFIED) {
                 FileChangeKind::Modified
             } else if st.contains(git2::Status::WT_DELETED) {
@@ -883,10 +954,17 @@ fn compute_working_tree_status(
     }
 
     let convert_elapsed = convert_started.elapsed();
-    if let (Some(fp), Some(c)) = (fingerprint, cache) {
-        c.lock()
+    if let (Some(fp), Some(cache), Some(generation)) = (fingerprint, cache, cache_generation) {
+        cache
+            .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(repo_path.to_path_buf(), (fp, wt_status.clone()));
+            .insert(
+                repo_path.to_path_buf(),
+                generation,
+                line_stats,
+                fp,
+                wt_status.clone(),
+            );
     }
 
     log::info!(
