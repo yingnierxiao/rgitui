@@ -1483,6 +1483,35 @@ pub(super) fn subscribe_sidebar(
                 })
                 .detach();
             }
+            SidebarEvent::ExpandUntrackedDirectory(path) => {
+                let directory = std::path::PathBuf::from(path);
+                let directory_label = path.clone();
+                let repo_path = this.effective_worktree_path(cx);
+                let sidebar = _sidebar.clone();
+                cx.spawn(async move |_, cx: &mut gpui::AsyncApp| {
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move {
+                            rgitui_git::list_untracked_files_at(&repo_path, &directory)
+                        })
+                        .await;
+                    match result {
+                        Ok(children) => {
+                            sidebar.update(cx, |sidebar, cx| {
+                                sidebar.expand_untracked_directory(&directory_label, children, cx);
+                            }).ok();
+                        }
+                        Err(error) => {
+                            log::warn!(
+                                "Failed to expand untracked directory {}: {}",
+                                directory_label,
+                                error
+                            );
+                        }
+                    }
+                })
+                .detach();
+            }
             SidebarEvent::ConflictFileSelected(path) => {
                 let path_buf = std::path::PathBuf::from(path);
                 let path_string = path.clone();
