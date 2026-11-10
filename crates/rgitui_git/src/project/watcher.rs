@@ -646,7 +646,7 @@ impl GitProject {
                                         generation,
                                         this.refresh_generation()
                                     );
-                                    return this.refresh_caches.has_unapplied_status_refresh();
+                                    return false;
                                 }
 
                                 // Ahead/behind survives this apply through
