@@ -270,6 +270,18 @@ impl IgnoreRepos {
 /// and taking any "yes" would let that answer suppress events for files the
 /// worktree itself tracks, leaving its status and diff stale while the user
 /// edits them. Only the innermost checkout has standing to answer.
+/// A Git-metadata notification can arrive after an explicit operation has
+/// already gathered and applied the resulting status snapshot. In that case the
+/// operation's refresh epoch proves the change is covered; do not schedule the
+/// same refresh a second time. A fallback fingerprint change without a Git
+/// notification must still trigger a refresh (e.g. on network filesystems).
+fn should_refresh_after_git_fingerprint_change(
+    git_notification: bool,
+    has_unapplied_status_refresh: bool,
+) -> bool {
+    !git_notification || has_unapplied_status_refresh
+}
+
 fn owning_root<'a>(roots: impl Iterator<Item = &'a Path>, path: &Path) -> Option<&'a Path> {
     roots
         .filter(|root| {
@@ -565,9 +577,8 @@ impl GitProject {
                     // The fallback covers network mounts, where notify is
                     // unreliable enough that it cannot be the only signal.
                     let fallback_due = last_scan.elapsed() >= FINGERPRINT_FALLBACK;
-                    let fingerprint_changed = if git_dirty.swap(false, Ordering::Relaxed)
-                        || fallback_due
-                        || watched_changed
+                    let git_notification = git_dirty.swap(false, Ordering::Relaxed);
+                    let fingerprint_changed = if git_notification || fallback_due || watched_changed
                     {
                         last_scan = std::time::Instant::now();
                         let fp_git_dir = main_git_dir.clone();
@@ -591,12 +602,21 @@ impl GitProject {
                     };
 
                     if fingerprint_changed {
-                        log::debug!("watcher: git state changed, scheduling refresh");
-                        worktree_cache.mark_worktree_status_dirty(&repo_path);
-                        for root in &desired {
-                            worktree_cache.mark_worktree_status_dirty(root);
+                        if should_refresh_after_git_fingerprint_change(
+                            git_notification,
+                            worktree_cache.has_unapplied_status_refresh(),
+                        ) {
+                            log::debug!("watcher: git state changed, scheduling refresh");
+                            worktree_cache.mark_worktree_status_dirty(&repo_path);
+                            for root in &desired {
+                                worktree_cache.mark_worktree_status_dirty(root);
+                            }
+                            dirty.store(true, Ordering::Relaxed);
+                        } else {
+                            log::debug!(
+                                "watcher: git metadata change already covered by operation refresh"
+                            );
                         }
-                        dirty.store(true, Ordering::Relaxed);
                     }
 
                     // An explicit operation refresh (Pull, Checkout, Stage, etc.)
@@ -720,6 +740,17 @@ impl GitProject {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operation_refresh_suppresses_duplicate_git_metadata_refresh() {
+        assert!(!should_refresh_after_git_fingerprint_change(true, false));
+        assert!(should_refresh_after_git_fingerprint_change(true, true));
+    }
+
+    #[test]
+    fn fallback_fingerprint_change_still_refreshes_without_notify_event() {
+        assert!(should_refresh_after_git_fingerprint_change(false, false));
+    }
 
     #[test]
     fn a_nested_worktree_answers_for_its_own_files() {
