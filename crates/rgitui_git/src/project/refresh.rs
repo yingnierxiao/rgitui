@@ -1428,7 +1428,7 @@ pub fn list_untracked_files_at(repo_path: &Path, directory: &Path) -> Result<Vec
 
     let output = git_command()
         .current_dir(repo_path)
-        .args(["ls-files", "--others", "--exclude-standard", "-z", "--"])
+        .args(["--literal-pathspecs", "ls-files", "--others", "--exclude-standard", "-z", "--"])
         .arg(directory)
         .output()
         .with_context(|| "Failed to enumerate untracked directory contents")?;

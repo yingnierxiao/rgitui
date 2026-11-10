@@ -224,7 +224,7 @@ impl GitProject {
                     if !directory_paths.is_empty() {
                         let output = super::git_command()
                             .current_dir(&worktree_path)
-                            .args(["add", "-A", "--"])
+                            .args(["--literal-pathspecs", "add", "-A", "--"])
                             .args(&directory_paths)
                             .output()
                             .context("Failed to stage untracked directory contents")?;

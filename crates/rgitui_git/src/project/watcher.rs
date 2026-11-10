@@ -526,6 +526,9 @@ impl GitProject {
                                 }
                             }
                         }
+                        if changed {
+                            dirty.store(true, Ordering::Relaxed);
+                        }
                         changed
                     };
 

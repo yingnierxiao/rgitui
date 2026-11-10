@@ -906,7 +906,7 @@ impl GitProject {
         }
         if let Some(epoch) = data.status_refresh_epoch {
             self.refresh_caches.mark_status_refresh_applied(epoch);
-        } else if self.refresh_caches.has_active_operations() {
+        } else {
             self.refresh_caches
                 .mark_status_refresh_applied(self.refresh_caches.status_refresh_epoch());
         }
