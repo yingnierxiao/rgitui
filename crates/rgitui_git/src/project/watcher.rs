@@ -419,6 +419,11 @@ impl GitProject {
                                 .map(|s| s.settings().watch_all_worktrees)
                                 .unwrap_or(false);
                             let proj = entity.read(app);
+                            // Keep refresh status scanning aligned with the watcher
+                            // policy. When watch-all is off, only the main checkout
+                            // and the worktree currently inspected by the user need
+                            // file status; inactive linked worktrees stay untouched.
+                            proj.refresh_caches.set_watch_all_worktrees(watch_all);
                             // Refetch at least as many commits as are currently loaded
                             // so a background refresh doesn't truncate commits the user
                             // paged in via "load more" (the gather otherwise replaces

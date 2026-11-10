@@ -33,6 +33,8 @@ pub(super) struct RefreshCaches {
     /// expensive and are only computed for this checkout, or the main checkout
     /// when no linked worktree is being inspected.
     inspected_worktree: Mutex<Option<PathBuf>>,
+    /// Whether the user explicitly asked to monitor every linked worktree.
+    watch_all_worktrees: Mutex<bool>,
     commit_log: Mutex<Option<CommitLogEntry>>,
 }
 
@@ -65,6 +67,22 @@ impl RefreshCaches {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// Update whether all linked worktrees should keep reporting file status.
+    pub(super) fn set_watch_all_worktrees(&self, enabled: bool) {
+        *self
+            .watch_all_worktrees
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = enabled;
+    }
+
+    /// Whether all linked worktrees should be scanned during this refresh.
+    fn watch_all_worktrees(&self) -> bool {
+        *self
+            .watch_all_worktrees
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// The commits the last refresh loaded, if they were loaded under `key`
@@ -565,6 +583,16 @@ fn should_compute_line_stats(
     enabled && (is_current || inspected_worktree == Some(worktree_path))
 }
 
+/// Only scan inactive worktrees when the user is inspecting one, or has
+/// explicitly enabled monitoring for every linked worktree.
+fn should_scan_worktree_status(
+    watch_all_worktrees: bool,
+    inspected_worktree: Option<&Path>,
+    worktree_path: &Path,
+) -> bool {
+    watch_all_worktrees || inspected_worktree == Some(worktree_path)
+}
+
 fn compute_working_tree_status(
     repo_path: &Path,
     cache: Option<&Mutex<WorktreeStatusCache>>,
@@ -811,6 +839,7 @@ fn gather_refresh_data_internal(
 ) -> Result<RefreshData> {
     let worktree_cache = refresh_caches.map(|caches| &caches.worktree_status);
     let inspected_worktree = refresh_caches.and_then(RefreshCaches::inspected_worktree);
+    let watch_all_worktrees = refresh_caches.is_some_and(RefreshCaches::watch_all_worktrees);
     let commit_limit = normalize_commit_limit(commit_limit);
     let refresh_timer = std::time::Instant::now();
     let repo = Repository::open(repo_path)
@@ -1000,6 +1029,13 @@ fn gather_refresh_data_internal(
         );
         for (idx, worktree) in worktrees.iter().enumerate() {
             if worktree.is_current {
+                continue;
+            }
+            if !should_scan_worktree_status(
+                watch_all_worktrees,
+                inspected_worktree.as_deref(),
+                &worktree.path,
+            ) {
                 continue;
             }
             let worktree_path = worktree.path.clone();
@@ -2447,6 +2483,17 @@ mod working_tree_status_tests {
             .iter()
             .map(|file| (file.additions, file.deletions))
             .collect()
+    }
+
+    #[test]
+    fn inactive_worktree_status_is_scanned_only_when_requested() {
+        let inspected = Path::new("repo/worktrees/inspected");
+        let inactive = Path::new("repo/worktrees/inactive");
+
+        assert!(!should_scan_worktree_status(false, None, inactive));
+        assert!(should_scan_worktree_status(false, Some(inspected), inspected));
+        assert!(!should_scan_worktree_status(false, Some(inspected), inactive));
+        assert!(should_scan_worktree_status(true, None, inactive));
     }
 
     #[test]
