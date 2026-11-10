@@ -144,6 +144,7 @@ pub use local_ops::branches_containing_commit;
 pub use reflog::{compute_reflog, ReflogEntryInfo};
 pub use refresh::gather_refresh_data;
 pub use refresh::gather_refresh_data_lightweight;
+pub use refresh::list_untracked_files_at;
 pub use refresh::{enrich_commit_info, extract_co_authors};
 pub use search::git_grep;
 pub use submodule::{
@@ -322,6 +323,10 @@ pub struct RefreshData {
     /// Current Git user email, read from repo config then global config.
     /// Used for "My Branches" / "My Commits" filtering.
     pub current_user_email: Option<String>,
+    /// Whether this snapshot also updated the shared worktree-status cache.
+    pub status_cache_updated: bool,
+    /// Status event epoch observed when this snapshot started gathering.
+    pub status_refresh_epoch: Option<u64>,
 }
 
 /// Events emitted by GitProject.
@@ -533,6 +538,7 @@ impl GitProject {
     ) -> u64 {
         let id = self.next_operation_id;
         self.next_operation_id += 1;
+        self.refresh_caches.begin_operation();
         cx.emit(GitProjectEvent::OperationUpdated(GitOperationUpdate {
             id,
             kind,
@@ -576,6 +582,7 @@ impl GitProject {
         names: (Option<Message>, Option<String>, Option<String>),
         cx: &mut Context<Self>,
     ) {
+        self.refresh_caches.finish_operation();
         cx.emit(GitProjectEvent::OperationUpdated(GitOperationUpdate {
             id,
             kind,
@@ -598,6 +605,7 @@ impl GitProject {
         names: (Option<String>, Option<String>, bool),
         cx: &mut Context<Self>,
     ) {
+        self.refresh_caches.finish_operation();
         cx.emit(GitProjectEvent::OperationUpdated(GitOperationUpdate {
             id,
             kind,
@@ -893,6 +901,16 @@ impl GitProject {
     }
 
     pub(crate) fn apply_refresh_data(&mut self, data: RefreshData) {
+        if !data.status_cache_updated {
+            self.refresh_caches.invalidate_all_status_cache();
+        }
+        if let Some(epoch) = data.status_refresh_epoch {
+            self.refresh_caches.mark_status_refresh_applied(epoch);
+        } else if self.refresh_caches.has_active_operations() {
+            self.refresh_caches
+                .mark_status_refresh_applied(self.refresh_caches.status_refresh_epoch());
+        }
+
         self.head_branch = data.head_branch;
         self.head_detached = data.head_detached;
         self.previous_branch = data.previous_branch;

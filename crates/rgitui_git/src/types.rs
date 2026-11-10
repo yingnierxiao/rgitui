@@ -265,6 +265,8 @@ pub enum FileChangeKind {
     Copied,
     TypeChange,
     Untracked,
+    /// An untracked directory placeholder. Its contents are listed on demand.
+    UntrackedDirectory,
     Conflicted,
 }
 
@@ -277,7 +279,7 @@ impl FileChangeKind {
             FileChangeKind::Renamed => "R",
             FileChangeKind::Copied => "C",
             FileChangeKind::TypeChange => "T",
-            FileChangeKind::Untracked => "?",
+            FileChangeKind::Untracked | FileChangeKind::UntrackedDirectory => "?",
             FileChangeKind::Conflicted => "!",
         }
     }
