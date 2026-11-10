@@ -2836,6 +2836,22 @@ mod working_tree_status_tests {
         repo.reset(&target, kind, None).unwrap();
     }
 
+    #[test]
+    fn clean_status_cache_skips_repository_open_and_status_scan_until_invalidated() {
+        let fixture = TempRepo::init();
+        fixture.commit_file("clean.txt", "unchanged\n", "initial");
+        let cache = Mutex::new(WorktreeStatusCache::new());
+
+        let first = compute_working_tree_status(fixture.path(), Some(&cache), false).unwrap();
+        fixture.write_file("new.txt", "not yet observed\n");
+        let cached = compute_working_tree_status(fixture.path(), Some(&cache), false).unwrap();
+        assert_eq!(first, cached, "clean cache is reused without polling Git");
+
+        cache.lock().unwrap().mark_dirty(fixture.path());
+        let refreshed = compute_working_tree_status(fixture.path(), Some(&cache), false).unwrap();
+        assert_eq!(refreshed.unstaged.len(), 1);
+    }
+
     /// The fingerprint has to hold still while the working tree does, or every
     /// refresh would miss the cache and diff every changed file again.
     #[test]
@@ -2843,12 +2859,7 @@ mod working_tree_status_tests {
         let fixture = repo_with_staged_and_unstaged_edits();
         fixture.write_file("draft.txt", "one\n");
         let cache = Mutex::new(WorktreeStatusCache::new());
-        let cached_fingerprint = || {
-            let entries = cache.lock().unwrap();
-            entries
-                .get(fixture.path())
-                .map(|(fingerprint, _)| *fingerprint)
-        };
+        let cached_fingerprint = || cache.lock().unwrap().fingerprint(fixture.path());
 
         cached_status(&fixture, &cache);
         let first = cached_fingerprint();
@@ -2868,6 +2879,7 @@ mod working_tree_status_tests {
         fixture.write_file("draft.txt", "one\n");
         let before = cached_status(&fixture, &cache);
         fixture.write_file("draft.txt", "one\ntwo\nthree\n");
+        cache.lock().unwrap().mark_dirty(fixture.path());
         let after = cached_status(&fixture, &cache);
 
         assert_eq!(line_counts(&before.unstaged), vec![(1, 0)]);
@@ -2887,6 +2899,7 @@ mod working_tree_status_tests {
 
         let before = cached_status(&fixture, &cache);
         reset_to(&fixture, first, git2::ResetType::Soft);
+        cache.lock().unwrap().mark_dirty(fixture.path());
         let after = cached_status(&fixture, &cache);
 
         assert_eq!(line_counts(&before.staged), vec![(1, 0)]);
@@ -2905,6 +2918,7 @@ mod working_tree_status_tests {
 
         let before = cached_status(&fixture, &cache);
         reset_to(&fixture, first, git2::ResetType::Mixed);
+        cache.lock().unwrap().mark_dirty(fixture.path());
         let after = cached_status(&fixture, &cache);
 
         assert_eq!(line_counts(&before.unstaged), vec![(1, 0)]);
@@ -2948,6 +2962,7 @@ mod commit_log_reuse_tests {
 
         // A working-tree edit is what wakes the watcher, and moves no ref.
         repo.write_file("edited.txt", "changed\n");
+        caches.mark_worktree_status_dirty(repo.path());
         let second = gather(&repo, &caches, 10);
 
         assert!(Arc::ptr_eq(&first.recent_commits, &second.recent_commits));
