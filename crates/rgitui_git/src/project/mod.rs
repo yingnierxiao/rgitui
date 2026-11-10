@@ -711,8 +711,7 @@ impl GitProject {
     /// watched and fingerprinted regardless of the `watch_all_worktrees`
     /// setting. Pass `None` when the user leaves worktree inspection.
     pub fn set_inspected_worktree(&mut self, path: Option<PathBuf>) {
-        self.refresh_caches
-            .set_inspected_worktree(path.clone());
+        self.refresh_caches.set_inspected_worktree(path.clone());
         self.inspected_worktree = path;
     }
 
