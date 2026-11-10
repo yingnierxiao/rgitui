@@ -512,6 +512,9 @@ impl GitProject {
                                     }
                                 }
                             }
+                            for root in desired.difference(&current) {
+                                worktree_cache.mark_worktree_status_dirty(root);
+                            }
                             *current = desired.clone();
 
                             if let Ok(mut repos) = ignore_repos.lock() {
@@ -521,9 +524,6 @@ impl GitProject {
                                 for root in &desired {
                                     repos.add(root);
                                 }
-                            }
-                            for root in desired.difference(&current) {
-                                worktree_cache.mark_worktree_status_dirty(root);
                             }
                         }
                         changed
