@@ -200,6 +200,7 @@ impl GitProject {
                 .spawn(async move {
                     let repo = Repository::open(&worktree_path)?;
                     let mut index = repo.index()?;
+                    let mut directory_paths = Vec::new();
                     for path in &task_paths {
                         if index.conflict_get(path).is_ok() {
                             return Err(error(msg!(
@@ -207,13 +208,34 @@ impl GitProject {
                                 path = path.display()
                             )));
                         }
-                        if worktree_path.join(path).exists() {
+                        let full_path = worktree_path.join(path);
+                        if full_path.is_dir() {
+                            // libgit2 Index::add_path accepts files, not a directory
+                            // placeholder. Let Git expand the selected directory.
+                            directory_paths.push(path.clone());
+                        } else if full_path.exists() {
                             index.add_path(path)?;
                         } else {
                             index.remove_path(path)?;
                         }
                     }
                     index.write()?;
+                    drop(index);
+                    if !directory_paths.is_empty() {
+                        let output = super::git_command()
+                            .current_dir(&worktree_path)
+                            .args(["add", "-A", "--"])
+                            .args(&directory_paths)
+                            .output()
+                            .context("Failed to stage untracked directory contents")?;
+                        if !output.status.success() {
+                            anyhow::bail!(
+                                "git add failed: {}",
+                                String::from_utf8_lossy(&output.stderr).trim()
+                            );
+                        }
+                    }
+                    worktree_cache.mark_worktree_status_dirty(&worktree_path);
                     gather_refresh_data_lightweight_cached(
                         &refresh_repo_path,
                         commit_limit,
