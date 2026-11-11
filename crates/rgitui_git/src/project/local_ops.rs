@@ -114,6 +114,165 @@ fn unstage_all_in_repo(repo: &Repository) -> Result<()> {
     Ok(())
 }
 
+/// Run a local Git command with a private index. No command in this helper
+/// changes the real staging area; the environment override is per process.
+fn run_with_selected_index(worktree: &Path, index: &Path, args: &[&str]) -> Result<String> {
+    let output = super::git_command()
+        .current_dir(worktree)
+        .env("GIT_INDEX_FILE", index)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .args(args)
+        .output()
+        .with_context(|| format!("Unable to execute git {}", args.join(" ")))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Pass paths as NUL-delimited literal pathspecs rather than arguments so
+/// Windows command line length, whitespace and Git wildcard metacharacters
+/// cannot alter the selection.
+fn write_selection_pathspec(destination: &Path, files: &[&Path]) -> Result<()> {
+    let mut bytes = Vec::new();
+    for path in files {
+        if path.as_os_str().is_empty()
+            || path.is_absolute()
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::Prefix(_)
+                        | std::path::Component::RootDir
+                )
+            })
+        {
+            anyhow::bail!("Invalid relative commit path: {}", path.display());
+        }
+        let path_text = path.to_str().ok_or_else(|| {
+            anyhow::anyhow!("Commit path is not valid Unicode: {}", path.display())
+        })?;
+        bytes.extend_from_slice(path_text.as_bytes());
+        bytes.push(0);
+    }
+    std::fs::write(destination, bytes)?;
+    Ok(())
+}
+
+/// Prepare the selected commit tree without ever writing the real Git index.
+/// The temporary index is copied from the current checkout's index to retain
+/// already staged hunks, then excluded paths are reset to HEAD and fully
+/// selected paths are staged from the working directory.
+///
+/// The TempDir stays alive until write-tree returns. Removing it never changes
+/// the on-disk index used by command-line Git or another client.
+fn tree_for_virtual_selection(
+    repo: &Repository,
+    worktree: &Path,
+    selected: &[CommitSelectedFile],
+    excluded: &[PathBuf],
+    amend: bool,
+) -> Result<git2::Oid> {
+    if selected.is_empty() {
+        return Err(error(msg!("git.error.no_staged_changes")));
+    }
+    if repo.state() != git2::RepositoryState::Clean {
+        anyhow::bail!(
+            "Virtual file selection is unavailable during an in-progress merge, \
+             rebase or cherry-pick. Finish the Git operation before committing."
+        );
+    }
+    let temporary = tempfile::Builder::new()
+        .prefix("rgitui-commit-index-")
+        .tempdir()?;
+    let temp_index = temporary.path().join("index");
+    let real_index = repo.path().join("index");
+    if real_index.exists() {
+        std::fs::copy(&real_index, &temp_index)
+            .with_context(|| format!("Unable to copy index for {}", worktree.display()))?;
+    } else if repo.head().is_ok() {
+        run_with_selected_index(worktree, &temp_index, &["read-tree", "HEAD"])?;
+    } else {
+        run_with_selected_index(worktree, &temp_index, &["read-tree", "--empty"])?;
+    }
+
+    // Reset everything excluded from this commit within the private index.
+    // This includes paths with existing staged changes in the REAL index.
+    if !excluded.is_empty() {
+        let list = temporary.path().join("excluded.paths");
+        let paths = excluded.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        write_selection_pathspec(&list, &paths)?;
+        let arg = format!("--pathspec-from-file={}", list.display());
+        if repo.head().is_ok() {
+            run_with_selected_index(
+                worktree,
+                &temp_index,
+                &[
+                    "--literal-pathspecs",
+                    "reset",
+                    "--quiet",
+                    "HEAD",
+                    &arg,
+                    "--pathspec-file-nul",
+                ],
+            )?;
+        } else {
+            run_with_selected_index(
+                worktree,
+                &temp_index,
+                &[
+                    "--literal-pathspecs",
+                    "rm",
+                    "-r",
+                    "--cached",
+                    "--ignore-unmatch",
+                    &arg,
+                    "--pathspec-file-nul",
+                ],
+            )?;
+        }
+    }
+
+    // Fully included paths replace any staged snapshot with the working tree.
+    // Partial selections deliberately leave the original index entries intact.
+    let full = selected
+        .iter()
+        .filter(|file| file.contents == CommitFileContents::WorkingTree)
+        .map(|file| file.path.as_path())
+        .collect::<Vec<_>>();
+    if !full.is_empty() {
+        let list = temporary.path().join("included.paths");
+        write_selection_pathspec(&list, &full)?;
+        let arg = format!("--pathspec-from-file={}", list.display());
+        run_with_selected_index(
+            worktree,
+            &temp_index,
+            &[
+                "--literal-pathspecs",
+                "add",
+                "-A",
+                &arg,
+                "--pathspec-file-nul",
+            ],
+        )?;
+    }
+
+    let oid = run_with_selected_index(worktree, &temp_index, &["write-tree"])?;
+    let tree_oid = git2::Oid::from_str(oid.trim())
+        .with_context(|| format!("Invalid tree id from temporary index: {oid}"))?;
+    if !amend && repo.head().is_ok_and(|head| {
+        head.peel_to_commit()
+            .is_ok_and(|head| head.tree_id() == tree_oid)
+    }) {
+        return Err(error(msg!("git.error.no_staged_changes")));
+    }
+    Ok(tree_oid)
+}
+
 /// Commit the resolved merge in `repo` with its stored `MERGE_MSG`, exactly as
 /// `git merge --continue` does: the index is committed as the user staged it,
 /// with `MERGE_HEAD`'s commits as the extra parents. Untracked and unstaged
