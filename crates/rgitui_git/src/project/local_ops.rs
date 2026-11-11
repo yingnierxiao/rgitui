@@ -24,6 +24,60 @@ use super::{ensure_clean_worktree, head_branch_name, GitProject, GitProjectEvent
 //  - BUG-41: `discard_changes_at` directory handling — verifier judged the current
 //    code correct (untracked dirs take the remove_dir_all branch); left unchanged.
 
+/// Unstage selected paths without modifying the working directory.
+///
+/// git_reset_default requires a commit-ish target, not the HEAD tree.
+/// Passing a tree makes libgit2 attempt to peel it to a commit and fail with
+/// InvalidSpec (-12). On an unborn branch there is no HEAD commit, so remove
+/// only the selected index entries instead.
+fn unstage_paths_in_repo(repo: &Repository, paths: &[PathBuf]) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    match repo.head() {
+        Ok(head) => {
+            let commit = head.peel_to_commit()?;
+            repo.reset_default(Some(commit.as_object()), paths)?;
+        }
+        Err(e)
+            if matches!(
+                e.code(),
+                git2::ErrorCode::UnbornBranch | git2::ErrorCode::NotFound
+            ) =>
+        {
+            let mut index = repo.index()?;
+            index.remove_all(paths.iter(), None)?;
+            index.write()?;
+        }
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
+}
+
+/// Unstage everything while leaving working-tree bytes unchanged. A mixed
+/// reset must also receive a commit, never HEAD peeled to ObjectType::Any
+/// (which can produce a tree).
+fn unstage_all_in_repo(repo: &Repository) -> Result<()> {
+    match repo.head() {
+        Ok(head) => {
+            let commit = head.peel_to_commit()?;
+            repo.reset(commit.as_object(), git2::ResetType::Mixed, None)?;
+        }
+        Err(e)
+            if matches!(
+                e.code(),
+                git2::ErrorCode::UnbornBranch | git2::ErrorCode::NotFound
+            ) =>
+        {
+            let mut index = repo.index()?;
+            index.clear()?;
+            index.write()?;
+        }
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
+}
+
 /// Commit the resolved merge in `repo` with its stored `MERGE_MSG`, exactly as
 /// `git merge --continue` does: the index is committed as the user staged it,
 /// with `MERGE_HEAD`'s commits as the extra parents. Untracked and unstaged
@@ -319,21 +373,7 @@ impl GitProject {
                 .background_executor()
                 .spawn(async move {
                     let repo = Repository::open(&worktree_path)?;
-                    if let Ok(head_tree) = repo.head().and_then(|h| h.peel_to_tree()) {
-                        repo.reset_default(Some(&head_tree.into_object()), &task_paths)?;
-                    } else {
-                        let mut index = repo.index()?;
-                        for path in &task_paths {
-                            if let Err(e) = index.remove_path(path) {
-                                log::warn!(
-                                    "Failed to remove path from index during unstage: {}: {}",
-                                    path.display(),
-                                    e
-                                );
-                            }
-                        }
-                        index.write()?;
-                    }
+                    unstage_paths_in_repo(&repo, &task_paths)?;
                     worktree_cache.mark_worktree_status_dirty(&worktree_path);
                     gather_refresh_data_lightweight_cached(
                         &refresh_repo_path,
@@ -506,10 +546,7 @@ impl GitProject {
                 .background_executor()
                 .spawn(async move {
                     let repo = Repository::open(&worktree_path)?;
-                    if let Ok(head) = repo.head() {
-                        let obj = head.peel(git2::ObjectType::Any)?;
-                        repo.reset(&obj, git2::ResetType::Mixed, None)?;
-                    }
+                    unstage_all_in_repo(&repo)?;
                     worktree_cache.mark_worktree_status_dirty(&worktree_path);
                     gather_refresh_data_lightweight_cached(
                         &refresh_repo_path,
@@ -7227,6 +7264,93 @@ mod tests {
 
     /// A repo whose single commit has an empty tree, so a test is free to create
     /// and stage `file.txt` itself without colliding with an existing entry.
+    #[test]
+    fn unstage_selected_file_restores_head_index_without_losing_worktree_edit() {
+        let fixture = TempRepo::init();
+        fixture.write_file("tracked.txt", "original\n");
+        fixture.stage("tracked.txt");
+        fixture.commit("initial");
+        fixture.write_file("tracked.txt", "changed\n");
+        fixture.stage("tracked.txt");
+
+        super::unstage_paths_in_repo(
+            fixture.repo(),
+            &[std::path::PathBuf::from("tracked.txt")],
+        )
+        .unwrap();
+
+        let index = fixture.repo().index().unwrap();
+        let staged = index
+            .get_path(std::path::Path::new("tracked.txt"), 0)
+            .unwrap();
+        let head_tree = fixture.repo().head().unwrap().peel_to_tree().unwrap();
+        assert_eq!(
+            staged.id,
+            head_tree.get_path(std::path::Path::new("tracked.txt")).unwrap().id()
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.path().join("tracked.txt")).unwrap(),
+            "changed\n"
+        );
+    }
+
+    #[test]
+    fn unstage_all_keeps_head_and_worktree_contents() {
+        let fixture = TempRepo::init();
+        fixture.write_file("tracked.txt", "original\n");
+        fixture.stage("tracked.txt");
+        fixture.commit("initial");
+        let head_oid = fixture.head_oid();
+        fixture.write_file("tracked.txt", "changed\n");
+        fixture.stage("tracked.txt");
+        fixture.write_file("new.txt", "new file\n");
+        fixture.stage("new.txt");
+
+        super::unstage_all_in_repo(fixture.repo()).unwrap();
+
+        assert_eq!(fixture.head_oid(), head_oid);
+        let index = fixture.repo().index().unwrap();
+        assert!(index.get_path(std::path::Path::new("new.txt"), 0).is_none());
+        assert_eq!(
+            index.get_path(std::path::Path::new("tracked.txt"), 0).unwrap().id,
+            fixture.repo().head().unwrap().peel_to_tree().unwrap()
+                .get_path(std::path::Path::new("tracked.txt")).unwrap().id()
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.path().join("tracked.txt")).unwrap(),
+            "changed\n"
+        );
+        assert!(fixture.path().join("new.txt").exists());
+    }
+
+    #[test]
+    fn unborn_head_unstage_removes_index_entry_but_keeps_file() {
+        let fixture = TempRepo::init();
+        fixture.write_file("first.txt", "content\n");
+        fixture.stage("first.txt");
+
+        super::unstage_paths_in_repo(
+            fixture.repo(),
+            &[std::path::PathBuf::from("first.txt")],
+        )
+        .unwrap();
+
+        assert!(fixture.repo().index().unwrap().is_empty());
+        assert!(fixture.path().join("first.txt").exists());
+    }
+
+    #[test]
+    fn unborn_head_unstage_all_clears_index_without_deleting_files() {
+        let fixture = TempRepo::init();
+        fixture.write_file("first.txt", "content\n");
+        fixture.stage("first.txt");
+
+        super::unstage_all_in_repo(fixture.repo()).unwrap();
+
+        assert!(fixture.repo().index().unwrap().is_empty());
+        assert!(fixture.path().join("first.txt").exists());
+    }
+
     fn make_test_repo() -> TempRepo {
         let repo = TempRepo::init();
         repo.commit("initial commit");
