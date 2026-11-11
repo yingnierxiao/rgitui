@@ -1344,6 +1344,14 @@ fn gather_refresh_data_internal(
     let reused = refresh_caches
         .zip(log_key)
         .and_then(|(caches, key)| caches.reusable_commit_log(key));
+    log::info!(
+        "history cache: {} key={:?} limit={} author_filter={} active_cache={}",
+        if reused.is_some() { "hit" } else { "miss" },
+        log_key,
+        commit_limit,
+        author_filter.is_some(),
+        refresh_caches.is_some()
+    );
     let (recent_commits, has_more_commits) = match reused {
         Some(reused) => {
             log::debug!(
@@ -1520,7 +1528,9 @@ fn run_commit_log(
         log_cmd.arg("HEAD");
     }
     log_cmd.arg(format!("-{}", limit.saturating_add(1)));
+    let process_started = std::time::Instant::now();
     let output = log_cmd.output().with_context(|| "Failed to run git log")?;
+    let process_duration = process_started.elapsed();
 
     if !output.status.success() {
         anyhow::bail!(
@@ -1529,8 +1539,18 @@ fn run_commit_log(
         );
     }
 
+    let parse_started = std::time::Instant::now();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut commits = parse_git_log_records(&stdout, &mut ref_map);
+    let parse_duration = parse_started.elapsed();
+    log::info!(
+        "git log timing: process={:?} parse={:?} output_bytes={} refs={} requested={}",
+        process_duration,
+        parse_duration,
+        output.stdout.len(),
+        ref_map.len(),
+        limit
+    );
     // The subprocess requested one extra commit (`-{limit + 1}`); its
     // presence signals more history is available beyond the loaded window.
     let has_more = commits.len() > limit;
