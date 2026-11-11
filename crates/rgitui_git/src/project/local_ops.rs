@@ -46,7 +46,11 @@ fn unstage_paths_in_repo(repo: &Repository, paths: &[PathBuf]) -> Result<()> {
             ) =>
         {
             let mut index = repo.index()?;
-            index.remove_all(paths.iter(), None)?;
+            // Use exact index paths, not pathspec glob matching: a filename
+            // containing '[' or '*' must not unstage unrelated files.
+            for path in paths {
+                index.remove_path(path)?;
+            }
             index.write()?;
         }
         Err(e) => return Err(e.into()),
@@ -7292,6 +7296,30 @@ mod tests {
             fs::read_to_string(fixture.path().join("tracked.txt")).unwrap(),
             "changed\n"
         );
+    }
+
+    #[test]
+    fn unstage_new_file_only_removes_its_index_entry() {
+        let fixture = TempRepo::init();
+        fixture.write_file("tracked.txt", "original\n");
+        fixture.stage("tracked.txt");
+        fixture.commit("initial");
+        fixture.write_file("added.txt", "added\n");
+        fixture.stage("added.txt");
+
+        super::unstage_paths_in_repo(
+            fixture.repo(),
+            &[std::path::PathBuf::from("added.txt")],
+        )
+        .unwrap();
+
+        assert!(fixture
+            .repo()
+            .index()
+            .unwrap()
+            .get_path(std::path::Path::new("added.txt"), 0)
+            .is_none());
+        assert!(fixture.path().join("added.txt").exists());
     }
 
     #[test]
