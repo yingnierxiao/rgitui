@@ -1524,14 +1524,14 @@ impl Render for ChangesPanel {
                 }
 
                 let copy_path = menu_state.path.to_string_lossy().to_string();
-                let panel = weak_panel.clone();
+                let panel_entity = weak_panel.clone();
                 menu = menu.separator().item(
                     ContextMenuItem::new(t!("changes.menu.copy_path")).on_click(
                         move |_, _, cx| {
                             cx.write_to_clipboard(gpui::ClipboardItem::new_string(
                                 copy_path.clone(),
                             ));
-                            panel
+                            panel_entity
                                 .update(cx, |this, cx| {
                                     this.context_menu = None;
                                     cx.notify();
