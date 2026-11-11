@@ -252,12 +252,65 @@ fn change_matches_filter(
             || row.path.to_string_lossy().to_lowercase().contains(needle))
 }
 
+/// The Git index remains authoritative; these are temporary visual states
+/// while an asynchronous stage/unstage request is in flight.
+fn visual_state(row: &ChangeRow, pending: &HashMap<PathBuf, CheckState>) -> CheckState {
+    pending.get(&row.path).copied().unwrap_or_else(|| row.state())
+}
+
+/// Clear optimistic states only after the refreshed index agrees with them.
+/// An earlier watcher snapshot must not undo a checkbox while Git is still working.
+fn reconcile_pending(
+    rows: &[ChangeRow],
+    pending: &mut HashMap<PathBuf, CheckState>,
+) -> bool {
+    let previous_count = pending.len();
+    pending.retain(|path, desired| {
+        rows.binary_search_by(|row| row.path.cmp(path))
+            .ok()
+            .is_some_and(|index| rows[index].state() != *desired)
+    });
+    previous_count != pending.len()
+}
+
+fn visual_header_state(
+    rows: &[ChangeRow],
+    visible: &[usize],
+    pending: &HashMap<PathBuf, CheckState>,
+) -> CheckState {
+    let mut any = false;
+    let mut all = true;
+    let mut found = false;
+    for row in visible.iter().filter_map(|index| rows.get(*index)) {
+        if row.has_conflict() {
+            continue;
+        }
+        found = true;
+        match visual_state(row, pending) {
+            CheckState::Checked => any = true,
+            CheckState::Indeterminate => {
+                any = true;
+                all = false;
+            }
+            CheckState::Unchecked => all = false,
+        }
+    }
+    if found && all {
+        CheckState::Checked
+    } else if any {
+        CheckState::Indeterminate
+    } else {
+        CheckState::Unchecked
+    }
+}
+
 /// GitHub Desktop-style working-tree list. The repository navigation Sidebar
 /// retains sole ownership of Git actions; this panel forwards SidebarEvent
 /// instead of implementing a second set of Stage/Unstage handlers.
 pub struct ChangesPanel {
     sidebar: WeakEntity<Sidebar>,
     rows: Arc<Vec<ChangeRow>>,
+    pending: Arc<HashMap<PathBuf, CheckState>>,
     visible: Arc<Vec<usize>>,
     /// Cached counts avoid scanning huge working trees on every 60 FPS render.
     staged_count: usize,
@@ -297,6 +350,7 @@ impl ChangesPanel {
         Self {
             sidebar,
             rows: Arc::new(Vec::new()),
+            pending: Arc::new(HashMap::new()),
             visible: Arc::new(Vec::new()),
             staged_count: 0,
             header_state: CheckState::Unchecked,
@@ -317,6 +371,7 @@ impl ChangesPanel {
     pub fn set_worktree(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if self.worktree_path.as_ref() != Some(&path) {
             self.worktree_path = Some(path);
+            self.pending = Arc::new(HashMap::new());
             self.selected_path = None;
             self.selected_row = None;
             self.scroll = UniformListScrollHandle::new();
@@ -331,7 +386,8 @@ impl ChangesPanel {
         cx: &mut Context<Self>,
     ) {
         let updated = combine_changes(staged, unstaged);
-        if self.rows.as_ref() == &updated {
+        let pending_changed = reconcile_pending(&updated, Arc::make_mut(&mut self.pending));
+        if self.rows.as_ref() == &updated && !pending_changed {
             return;
         }
         if self
@@ -387,7 +443,10 @@ impl ChangesPanel {
     }
 
     fn update_counts(&mut self, rows: &[ChangeRow]) {
-        self.staged_count = rows.iter().filter(|row| row.staged.is_some()).count();
+        self.staged_count = rows
+            .iter()
+            .filter(|row| visual_state(row, &self.pending) != CheckState::Unchecked)
+            .count();
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -405,7 +464,9 @@ impl ChangesPanel {
             .iter()
             .enumerate()
             .filter(|(_, row)| {
-                change_matches_filter(row, &needle, self.kind_filter, self.only_staged)
+                change_matches_filter(row, &needle, self.kind_filter, false)
+                    && (!self.only_staged
+                        || visual_state(row, &self.pending) != CheckState::Unchecked)
             })
             .map(|(index, _)| index)
             .collect();
@@ -421,7 +482,11 @@ impl ChangesPanel {
             });
         }
         let (state, action) = bulk_toggle_for_visible(&self.rows, &visible);
-        self.header_state = state;
+        self.header_state = if self.pending.is_empty() {
+            state
+        } else {
+            visual_header_state(&self.rows, &visible, &self.pending)
+        };
         self.header_action = action;
         self.visible = Arc::new(visible);
         self.selected_row = self
@@ -440,17 +505,90 @@ impl ChangesPanel {
             .ok();
     }
 
+    /// Display the user's intent immediately without mutating the Git snapshot.
+    /// Rows with in-flight operations stay disabled until the index confirms
+    /// them (or an operation failure rolls the visual state back).
+    fn optimistic_stage_action(&mut self, event: &SidebarEvent, cx: &mut Context<Self>) {
+        let (desired, paths): (CheckState, Option<&[String]>) = match event {
+            SidebarEvent::StageFile(path) => {
+                (CheckState::Checked, Some(std::slice::from_ref(path)))
+            }
+            SidebarEvent::UnstageFile(path) => {
+                (CheckState::Unchecked, Some(std::slice::from_ref(path)))
+            }
+            SidebarEvent::StageFiles(paths) => (CheckState::Checked, Some(paths)),
+            SidebarEvent::UnstageFiles(paths) => (CheckState::Unchecked, Some(paths)),
+            SidebarEvent::StageAll => (CheckState::Checked, None),
+            SidebarEvent::UnstageAll => (CheckState::Unchecked, None),
+            _ => return,
+        };
+
+        let pending = Arc::make_mut(&mut self.pending);
+        let mut changed = false;
+        for row in self.rows.iter() {
+            if row.has_conflict()
+                || pending.contains_key(&row.path)
+                || row.state() == desired
+            {
+                continue;
+            }
+            if paths.is_some_and(|paths| {
+                !paths.iter().any(|path| row.path == Path::new(path))
+            }) {
+                continue;
+            }
+            pending.insert(row.path.clone(), desired);
+            changed = true;
+        }
+        if changed {
+            self.staged_count = self
+                .rows
+                .iter()
+                .filter(|row| visual_state(row, &self.pending) != CheckState::Unchecked)
+                .count();
+            self.rebuild_filter();
+            cx.notify();
+        }
+    }
+
+    fn dispatch_stage_action(&mut self, event: SidebarEvent, cx: &mut Context<Self>) {
+        self.optimistic_stage_action(&event, cx);
+        self.send(event, cx);
+    }
+
+    /// A failed Git operation must not leave a phantom checked/unchecked row.
+    /// The existing error toast remains responsible for reporting the failure.
+    pub fn rollback_pending(&mut self, stage: bool, cx: &mut Context<Self>) {
+        let desired = if stage {
+            CheckState::Checked
+        } else {
+            CheckState::Unchecked
+        };
+        let pending = Arc::make_mut(&mut self.pending);
+        let before = pending.len();
+        pending.retain(|_, target| *target != desired);
+        if pending.len() != before {
+            self.staged_count = self
+                .rows
+                .iter()
+                .filter(|row| visual_state(row, &self.pending) != CheckState::Unchecked)
+                .count();
+            self.rebuild_filter();
+            cx.notify();
+        }
+    }
+
     fn activate_selected(&self, cx: &mut App) {
         if let Some(row) = self.selected_row.and_then(|index| self.visible.get(index)) {
             self.send(self.rows[*row].selected_event(), cx);
         }
     }
 
-    fn toggle_selected(&self, cx: &mut App) {
+    fn toggle_selected(&mut self, cx: &mut Context<Self>) {
         if let Some(row) = self.selected_row.and_then(|index| self.visible.get(index)) {
             let row = &self.rows[*row];
-            if !row.has_conflict() {
-                self.send(row.toggle_event(), cx);
+            if !row.has_conflict() && !self.pending.contains_key(&row.path) {
+                self.dispatch_stage_action(row.toggle_event(), cx);
             }
         }
     }
@@ -478,6 +616,7 @@ impl Render for ChangesPanel {
         let colors = cx.colors().clone();
         let row_colors = colors.clone();
         let rows = self.rows.clone();
+        let pending = self.pending.clone();
         let visible = self.visible.clone();
         let selected_path = self.selected_path.clone();
         let sidebar = self.sidebar.clone();
@@ -486,7 +625,8 @@ impl Render for ChangesPanel {
         let staged_count = self.staged_count;
         let header_state = self.header_state;
         let header_action = self.header_action.clone();
-        let sidebar_header = sidebar.clone();
+        let panel_header = panel.clone();
+        let has_pending = !self.pending.is_empty();
         let file_count = rows.len();
         let kind_filter_button = panel.clone();
         let staged_filter_button = panel.clone();
@@ -529,14 +669,14 @@ impl Render for ChangesPanel {
                             .into();
                         let kind = row.kind();
                         let is_selected = selected_path.as_ref() == Some(&row.path);
-                        let check_state = row.state();
-                        let disabled = row.has_conflict();
+                        let check_state = visual_state(row, &pending);
+                        let disabled = row.has_conflict() || pending.contains_key(&row.path);
                         let select_action = row.selected_event();
                         let toggle_action = row.toggle_event();
                         let staged_preview = row.staged_preview_event();
                         let stats = row.display_status().cloned();
                         let sidebar_select = sidebar.clone();
-                        let sidebar_toggle = sidebar.clone();
+                        let weak_panel_toggle = panel.clone();
                         let sidebar_preview = sidebar.clone();
                         let weak_panel = panel.clone();
                         let path_selected = row.path.clone();
@@ -585,8 +725,10 @@ impl Render for ChangesPanel {
                                 .disabled(disabled)
                                 .on_click(move |_, _, cx| {
                                     cx.stop_propagation();
-                                    sidebar_toggle
-                                        .update(cx, |_, cx| cx.emit(toggle_action.clone()))
+                                    weak_panel_toggle
+                                        .update(cx, |this, cx| {
+                                            this.dispatch_stage_action(toggle_action.clone(), cx);
+                                        })
                                         .ok();
                                 }),
                             )
@@ -689,12 +831,14 @@ impl Render for ChangesPanel {
                     .border_color(colors.border_variant)
                     .child(
                         Checkbox::new("changes-check-all", header_state)
-                            .disabled(header_action.is_none())
+                            .disabled(header_action.is_none() || has_pending)
                             .on_click(move |_, _, cx| {
                                 cx.stop_propagation();
                                 if let Some(ref action) = header_action {
-                                    sidebar_header
-                                        .update(cx, |_, cx| cx.emit(action.clone()))
+                                    panel_header
+                                        .update(cx, |this, cx| {
+                                            this.dispatch_stage_action(action.clone(), cx);
+                                        })
                                         .ok();
                                 }
                             }),
@@ -820,6 +964,41 @@ mod tests {
             additions: 0,
             deletions: 0,
         }
+    }
+
+    #[test]
+    fn optimistic_states_reconcile_only_after_index_confirms_them() {
+        let rows = combine_changes(
+            vec![],
+            vec![file("a.rs", FileChangeKind::Modified)],
+        );
+        let mut pending = HashMap::from([(PathBuf::from("a.rs"), CheckState::Checked)]);
+        assert_eq!(visual_state(&rows[0], &pending), CheckState::Checked);
+        assert!(!reconcile_pending(&rows, &mut pending));
+        assert_eq!(visual_header_state(&rows, &[0], &pending), CheckState::Checked);
+        let confirmed = combine_changes(
+            vec![file("a.rs", FileChangeKind::Modified)],
+            vec![],
+        );
+        assert!(reconcile_pending(&confirmed, &mut pending));
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn optimistic_unstage_waits_for_actual_index_change() {
+        let staged = combine_changes(
+            vec![file("a.rs", FileChangeKind::Modified)],
+            vec![],
+        );
+        let mut pending = HashMap::from([(PathBuf::from("a.rs"), CheckState::Unchecked)]);
+        assert!(!reconcile_pending(&staged, &mut pending));
+        assert_eq!(visual_state(&staged[0], &pending), CheckState::Unchecked);
+        let unstaged = combine_changes(
+            vec![],
+            vec![file("a.rs", FileChangeKind::Modified)],
+        );
+        assert!(reconcile_pending(&unstaged, &mut pending));
+        assert!(pending.is_empty());
     }
 
     #[test]
