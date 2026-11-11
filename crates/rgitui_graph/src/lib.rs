@@ -3485,10 +3485,11 @@ impl Render for GraphView {
                                 .hover(move |style| {
                                     style.bg(if active { selected_bg } else { hover_bg })
                                 })
-                                .on_click(move |_: &ClickEvent, _, cx| {
+                                .on_click(move |_: &ClickEvent, window, cx| {
                                     cx.stop_propagation();
                                     result_view
                                         .update(cx, |graph, cx| {
+                                            graph.graph_focus.focus(window, cx);
                                             graph.current_match = result_index;
                                             if let Some(index) =
                                                 graph.list_index_for_commit_index(commit_index)
