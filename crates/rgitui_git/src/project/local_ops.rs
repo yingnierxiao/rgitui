@@ -200,11 +200,33 @@ fn tree_for_virtual_selection(
         run_with_selected_index(worktree, &temp_index, &["read-tree", "--empty"])?;
     }
 
-    // Reset everything excluded from this commit within the private index.
-    // This includes paths with existing staged changes in the REAL index.
-    if !excluded.is_empty() {
+    // Reset excluded paths plus any externally staged paths that were not
+    // present in the UI snapshot. Otherwise an IDE/CLI stage between refresh
+    // and Commit could silently leak an unselected file into the commit.
+    let mut excluded_paths = excluded.to_vec();
+    let mut seen = excluded_paths.iter().cloned().collect::<std::collections::HashSet<_>>();
+    let staged_output = super::git_command()
+        .current_dir(worktree)
+        .env("GIT_INDEX_FILE", &temp_index)
+        .args(["diff", "--cached", "--no-renames", "--name-only", "-z"])
+        .output()?;
+    if !staged_output.status.success() {
+        anyhow::bail!(
+            "Could not inspect staged files in temporary index: {}",
+            String::from_utf8_lossy(&staged_output.stderr)
+        );
+    }
+    for path in staged_output.stdout.split(|byte| *byte == 0).filter(|part| !part.is_empty()) {
+        let path = PathBuf::from(std::str::from_utf8(path)
+            .context("A staged path is not valid UTF-8; refusing to guess its identity")?);
+        let included = selected.iter().any(|file| path.starts_with(&file.path));
+        if !included && seen.insert(path.clone()) {
+            excluded_paths.push(path);
+        }
+    }
+    if !excluded_paths.is_empty() {
         let list = temporary.path().join("excluded.paths");
-        let paths = excluded.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        let paths = excluded_paths.iter().map(PathBuf::as_path).collect::<Vec<_>>();
         write_selection_pathspec(&list, &paths)?;
         let arg = format!("--pathspec-from-file={}", list.display());
         if repo.head().is_ok() {
