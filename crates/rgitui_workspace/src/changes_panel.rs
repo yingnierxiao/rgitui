@@ -719,7 +719,7 @@ impl ChangesPanel {
         for path in paths {
             if let Ok(index) = self.rows.binary_search_by(|row| row.path.cmp(path)) {
                 let row = &self.rows[index];
-                if actions.conflict {
+                if row.has_conflict() {
                     continue;
                 }
                 let previous = visual_state(row, &self.overrides);
