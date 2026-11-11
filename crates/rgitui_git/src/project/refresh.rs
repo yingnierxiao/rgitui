@@ -3032,17 +3032,23 @@ mod commit_log_reuse_tests {
     fn a_paginated_history_cache_can_be_reused_at_its_expanded_limit() {
         let repo = TempRepo::with_commits(5);
         let caches = RefreshCaches::default();
-        let snapshot = gather(&repo, &caches, 5);
-        caches.seed_loaded_history(
-            repo.repo(),
-            5,
-            None,
-            &snapshot.recent_commits,
-            snapshot.has_more_commits,
-        );
+        let first_page = gather(&repo, &caches, 2);
+        let mut loaded = first_page.recent_commits;
+        let cursor = loaded.last().map(|commit| commit.oid);
+        let branch_tips = vec![(repo.head_oid(), false, "main".to_string())];
+        let (page, has_more) =
+            load_more_commits_from_repo(repo.path(), 2, cursor, 3, &branch_tips, &[], None)
+                .unwrap();
+        Arc::make_mut(&mut loaded).extend(page);
+        assert_eq!(loaded.len(), 5);
 
-        let next = gather(&repo, &caches, 5);
-        assert!(Arc::ptr_eq(&snapshot.recent_commits, &next.recent_commits));
+        // Arc::make_mut detaches the old weak cache entry. Re-seeding at the
+        // expanded limit makes a later watcher/Pull refresh reuse all five.
+        let effective_limit = effective_refresh_commit_limit(2, loaded.len());
+        caches.seed_loaded_history(repo.repo(), effective_limit, None, &loaded, has_more);
+        let next = gather(&repo, &caches, effective_limit);
+        assert!(Arc::ptr_eq(&loaded, &next.recent_commits));
+        assert_eq!(next.recent_commits.len(), 5);
     }
 
     #[test]
