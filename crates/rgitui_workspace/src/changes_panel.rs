@@ -1483,7 +1483,7 @@ impl Render for ChangesPanel {
                     // would erase staged content too. Offer it only when the
                     // file has no staged side; partially staged files can be
                     // unstaged first, then safely discarded.
-                    if row.unstaged.is_some() && row.staged.is_none() {
+                    if can_discard_to_head(&row) {
                         let sidebar = weak_sidebar.clone();
                         let panel = weak_panel.clone();
                         let path = row.path.to_string_lossy().to_string();
