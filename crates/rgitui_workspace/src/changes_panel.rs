@@ -290,6 +290,58 @@ fn selected_virtual_paths(
         .collect()
 }
 
+/// Build an explicit snapshot independent of the list filter and of Git
+/// index mutations. This function is pure and safe to unit test directly.
+fn build_commit_selection(
+    rows: &[ChangeRow],
+    overrides: &HashMap<PathBuf, CheckState>,
+) -> (Vec<CommitSelectedFile>, Vec<PathBuf>) {
+        let mut included = Vec::new();
+        let mut excluded = Vec::new();
+        let mut rename_sources = Vec::new();
+        for row in rows.iter().filter(|row| !row.has_conflict()) {
+            let state = visual_state(row, overrides);
+            let contents = match state {
+                CheckState::Checked => Some(CommitFileContents::WorkingTree),
+                CheckState::Indeterminate => Some(CommitFileContents::Staged),
+                CheckState::Unchecked => None,
+            };
+            if let Some(contents) = contents {
+                included.push(CommitSelectedFile {
+                    path: row.path.clone(),
+                    contents,
+                });
+                // A rename is a pair: the original path must be removed when
+                // the new one is selected, even if status only lists its new path.
+                if row.kind() == FileChangeKind::Renamed {
+                    if let Some(old_path) = row
+                        .unstaged
+                        .as_ref()
+                        .or(row.staged.as_ref())
+                        .and_then(|file| file.old_path.as_ref())
+                    {
+                        rename_sources.push(CommitSelectedFile {
+                            path: old_path.clone(),
+                            contents,
+                        });
+                    }
+                }
+            } else {
+                excluded.push(row.path.clone());
+            }
+        }
+
+        for old in rename_sources {
+            if !included.iter().any(|file| file.path == old.path) {
+                included.push(old);
+            }
+        }
+        // Rename sources are included even if a stale separate status entry
+        // listed the old path as excluded.
+        excluded.retain(|path| !included.iter().any(|file| &file.path == path));
+        (included, excluded)
+}
+
 /// GitHub Desktop-style working-tree list. Row and header checkboxes are
 /// virtual, so fast toggles never queue Git index operations or status scans.
 
@@ -524,50 +576,7 @@ impl ChangesPanel {
     /// Capture all visible virtual choices for a commit. Filtering does not
     /// affect the commit selection, only what is displayed in the list.
     pub fn commit_selection(&self) -> (Vec<CommitSelectedFile>, Vec<PathBuf>) {
-        let mut included = Vec::new();
-        let mut excluded = Vec::new();
-        let mut rename_sources = Vec::new();
-        for row in self.rows.iter().filter(|row| !row.has_conflict()) {
-            let state = visual_state(row, &self.overrides);
-            let contents = match state {
-                CheckState::Checked => Some(CommitFileContents::WorkingTree),
-                CheckState::Indeterminate => Some(CommitFileContents::Staged),
-                CheckState::Unchecked => None,
-            };
-            if let Some(contents) = contents {
-                included.push(CommitSelectedFile {
-                    path: row.path.clone(),
-                    contents,
-                });
-                // A rename is a pair: the original path must be removed when
-                // the new one is selected, even if status only lists its new path.
-                if row.kind() == FileChangeKind::Renamed {
-                    if let Some(old_path) = row
-                        .unstaged
-                        .as_ref()
-                        .or(row.staged.as_ref())
-                        .and_then(|file| file.old_path.as_ref())
-                    {
-                        rename_sources.push(CommitSelectedFile {
-                            path: old_path.clone(),
-                            contents,
-                        });
-                    }
-                }
-            } else {
-                excluded.push(row.path.clone());
-            }
-        }
-
-        for old in rename_sources {
-            if !included.iter().any(|file| file.path == old.path) {
-                included.push(old);
-            }
-        }
-        // Rename sources are included even if a stale separate status entry
-        // listed the old path as excluded.
-        excluded.retain(|path| !included.iter().any(|file| &file.path == path));
-        (included, excluded)
+        build_commit_selection(&self.rows, &self.overrides)
     }
 
     pub fn selected_commit_count(&self) -> usize {
@@ -1260,6 +1269,36 @@ mod tests {
         let overrides =
             HashMap::from([(PathBuf::from("partial.rs"), CheckState::Checked)]);
         assert_eq!(visual_state(&rows[0], &overrides), CheckState::Checked);
+    }
+
+    #[test]
+    fn commit_snapshot_includes_only_virtual_choices_and_rename_sources() {
+        let mut renamed = file("new.rs", FileChangeKind::Renamed);
+        renamed.old_path = Some(PathBuf::from("old.rs"));
+        let rows = combine_changes(
+            vec![file("staged.rs", FileChangeKind::Modified)],
+            vec![
+                renamed,
+                file("skipped.rs", FileChangeKind::Modified),
+                file("partial.rs", FileChangeKind::Modified),
+            ],
+        );
+        let overrides = HashMap::from([
+            (PathBuf::from("new.rs"), CheckState::Checked),
+            (PathBuf::from("partial.rs"), CheckState::Checked),
+            (PathBuf::from("staged.rs"), CheckState::Unchecked),
+        ]);
+        let (included, excluded) = build_commit_selection(&rows, &overrides);
+        assert!(included.iter().any(|f| {
+            f.path == Path::new("new.rs") && f.contents == CommitFileContents::WorkingTree
+        }));
+        assert!(included.iter().any(|f| {
+            f.path == Path::new("old.rs") && f.contents == CommitFileContents::WorkingTree
+        }));
+        assert!(included.iter().any(|f| f.path == Path::new("partial.rs")));
+        assert!(!included.iter().any(|f| f.path == Path::new("staged.rs")));
+        assert!(excluded.contains(&PathBuf::from("skipped.rs")));
+        assert!(excluded.contains(&PathBuf::from("staged.rs")));
     }
 
     #[test]
