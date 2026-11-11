@@ -50,11 +50,13 @@ fn push_with_auto_pull(
             let repo = open_worktree_repo(worktree)?;
             // A remote may use a different push URL from its fetch URL.
             // Pulling from that other repository would merge the wrong history.
-            let configured_remote = repo.find_remote(remote)?;
-            if configured_remote
-                .pushurl()
-                .is_some_and(|url| Some(url) != configured_remote.url())
-            {
+            let push_url_differs = {
+                let configured_remote = repo.find_remote(remote)?;
+                configured_remote
+                    .pushurl()
+                    .is_some_and(|url| Some(url) != configured_remote.url())
+            };
+            if push_url_differs {
                 anyhow::bail!(
                     "Remote {remote} has a different push URL and fetch URL. Automatic pull \
                      was skipped to avoid merging an unrelated branch."
