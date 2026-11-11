@@ -614,11 +614,17 @@ impl Render for ChangesPanel {
                     cx.propagate();
                     return;
                 }
+                if event.keystroke.modifiers.secondary()
+                    || event.keystroke.modifiers.alt
+                {
+                    cx.propagate();
+                    return;
+                }
                 match event.keystroke.key.as_str() {
                     "up" | "k" => this.select_offset(-1, cx),
                     "down" | "j" => this.select_offset(1, cx),
                     "enter" => this.activate_selected(cx),
-                    "space" => this.toggle_selected(cx),
+                    "space" | "s" => this.toggle_selected(cx),
                     _ => cx.propagate(),
                 }
             }))
