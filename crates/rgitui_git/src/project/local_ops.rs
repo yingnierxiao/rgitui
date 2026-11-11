@@ -8518,6 +8518,123 @@ mod tests {
     // Commit tests
     // -------------------------------------------------------------------------
 
+    fn blob_text<'a>(repo: &'a git2::Repository, tree: &git2::Tree<'a>, path: &str) -> String {
+        let object = tree.get_path(std::path::Path::new(path)).unwrap().to_object(repo).unwrap();
+        String::from_utf8(object.as_blob().unwrap().content().to_vec()).unwrap()
+    }
+
+    #[test]
+    fn virtual_commit_tree_excludes_staged_files_and_does_not_write_real_index() {
+        let fixture = make_test_repo();
+        let path = fixture.path();
+        let repo = git2::Repository::open(path).unwrap();
+        fs::write(path.join("a space.txt"), "base a").unwrap();
+        fs::write(path.join("b[1].txt"), "base b").unwrap();
+        assert!(run_git(path, &["add", "-A"]).status.success());
+        assert!(run_git(path, &["commit", "-m", "base files"]).status.success());
+
+        fs::write(path.join("a space.txt"), "staged a").unwrap();
+        fs::write(path.join("b[1].txt"), "staged b").unwrap();
+        assert!(run_git(path, &["add", "-A"]).status.success());
+        fs::write(path.join("a space.txt"), "current a").unwrap();
+        let original_index = fs::read(repo.path().join("index")).unwrap();
+
+        let selection = vec![super::CommitSelectedFile {
+            path: "a space.txt".into(),
+            contents: super::CommitFileContents::WorkingTree,
+        }];
+        let tree_oid = super::tree_for_virtual_selection(
+            &repo,
+            path,
+            &selection,
+            &[std::path::PathBuf::from("b[1].txt")],
+            false,
+        )
+        .unwrap();
+        let tree = repo.find_tree(tree_oid).unwrap();
+        assert_eq!(blob_text(&repo, &tree, "a space.txt"), "current a");
+        assert_eq!(blob_text(&repo, &tree, "b[1].txt"), "base b");
+        assert_eq!(fs::read(repo.path().join("index")).unwrap(), original_index);
+    }
+
+    #[test]
+    fn virtual_commit_keeps_partial_stage_without_unstaged_hunks() {
+        let fixture = make_test_repo();
+        let path = fixture.path();
+        let repo = git2::Repository::open(path).unwrap();
+        fs::write(path.join("partial.txt"), "old").unwrap();
+        assert!(run_git(path, &["add", "-A"]).status.success());
+        assert!(run_git(path, &["commit", "-m", "base"]).status.success());
+        fs::write(path.join("partial.txt"), "staged").unwrap();
+        assert!(run_git(path, &["add", "-A"]).status.success());
+        fs::write(path.join("partial.txt"), "unstaged").unwrap();
+
+        let tree_oid = super::tree_for_virtual_selection(
+            &repo,
+            path,
+            &[super::CommitSelectedFile {
+                path: "partial.txt".into(),
+                contents: super::CommitFileContents::Staged,
+            }],
+            &[],
+            false,
+        )
+        .unwrap();
+        let tree = repo.find_tree(tree_oid).unwrap();
+        assert_eq!(blob_text(&repo, &tree, "partial.txt"), "staged");
+        assert_eq!(
+            String::from_utf8(fs::read(path.join("partial.txt")).unwrap()).unwrap(),
+            "unstaged"
+        );
+    }
+
+    #[test]
+    fn virtual_commit_never_includes_new_external_staging_not_in_selection() {
+        let fixture = make_test_repo();
+        let path = fixture.path();
+        let repo = git2::Repository::open(path).unwrap();
+        fs::write(path.join("included.txt"), "included").unwrap();
+        fs::write(path.join("external.txt"), "external").unwrap();
+        assert!(run_git(path, &["add", "-A"]).status.success());
+
+        let tree_oid = super::tree_for_virtual_selection(
+            &repo,
+            path,
+            &[super::CommitSelectedFile {
+                path: "included.txt".into(),
+                contents: super::CommitFileContents::WorkingTree,
+            }],
+            &[],
+            false,
+        )
+        .unwrap();
+        let tree = repo.find_tree(tree_oid).unwrap();
+        assert!(tree.get_name("included.txt").is_some());
+        assert!(tree.get_name("external.txt").is_none());
+        assert!(repo.index().unwrap().get_path(std::path::Path::new("external.txt"), 0).is_some());
+    }
+
+    #[test]
+    fn virtual_commit_can_prepare_unborn_branch_without_touching_stage() {
+        let fixture = TempRepo::init();
+        let path = fixture.path();
+        let repo = git2::Repository::open(path).unwrap();
+        fs::write(path.join("new.txt"), "first commit").unwrap();
+        let tree_oid = super::tree_for_virtual_selection(
+            &repo,
+            path,
+            &[super::CommitSelectedFile {
+                path: "new.txt".into(),
+                contents: super::CommitFileContents::WorkingTree,
+            }],
+            &[],
+            false,
+        )
+        .unwrap();
+        assert!(repo.find_tree(tree_oid).unwrap().get_name("new.txt").is_some());
+        assert!(repo.index().unwrap().is_empty());
+    }
+
     #[test]
     fn commit_creates_new_commit() {
         let fixture = make_test_repo();
