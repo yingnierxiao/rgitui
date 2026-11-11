@@ -177,13 +177,9 @@ pub(super) fn update_commit_panel_for_active_worktree(
     let Some(tab) = workspace.tabs.get(workspace.active_tab) else {
         return;
     };
-    let staged_count = {
-        let proj = tab.project.read(cx);
-        let (status, _) = active_worktree_status(tab, proj);
-        status.staged.len()
-    };
+    let selected_count = tab.changes_panel.read(cx).selected_commit_count();
     tab.commit_panel.update(cx, |commit_panel, cx| {
-        commit_panel.set_staged_count(staged_count, cx)
+        commit_panel.set_staged_count(selected_count, cx)
     });
 }
 
@@ -3047,30 +3043,68 @@ pub(super) fn subscribe_commit_panel(
         move |this, _cp, event: &CommitPanelEvent, cx| match event {
             CommitPanelEvent::CommitRequested { message, amend } => {
                 let worktree_path = this.effective_worktree_path(cx);
-                // Capture the pre-commit HEAD of the worktree the commit targets
-                // (not the main repo's log, which may be a different branch) so a
-                // later undo soft-resets the branch the commit was actually made on.
+                let changes_panel = this
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.project == project)
+                    .map(|tab| tab.changes_panel.clone());
+                let Some(changes_panel) = changes_panel else {
+                    return;
+                };
+                // Freeze the selection for this exact worktree at click time.
+                // Neither checking files nor gathering the list touches Git.
+                let selection = changes_panel.read(cx).commit_selection();
+                let committed_paths: Vec<std::path::PathBuf> = selection
+                    .0
+                    .iter()
+                    .map(|file| file.path.clone())
+                    .collect();
                 let previous_head_oid = project
                     .read(cx)
                     .head_oid_at(&worktree_path)
-                    .map(|o| o.to_string());
+                    .map(|oid| oid.to_string());
                 let msg = message.clone();
                 let is_amend = *amend;
-                project.update(cx, |proj, cx| {
-                    proj.commit_at(&msg, is_amend, &worktree_path, cx).detach();
+                let commit_task = project.update(cx, |proj, cx| {
+                    proj.commit_with_selection_at(
+                        &msg,
+                        is_amend,
+                        &worktree_path,
+                        Some(selection),
+                        cx,
+                    )
                 });
-                commit_panel_ref.update(cx, |cp, cx| {
-                    cp.set_message(String::new(), cx);
-                });
-                if !is_amend {
-                    if let Some(oid_hex) = previous_head_oid {
-                        this.push_undo(
-                            msg!("workspace.undo.label.commit"),
-                            UndoAction::SoftResetHead(oid_hex),
-                            cx,
-                        );
+                let weak_workspace = cx.entity().downgrade();
+                let panel_for_result = commit_panel_ref.clone();
+                cx.spawn(async move |_, cx: &mut gpui::AsyncApp| {
+                    // Preserve the message and selection on failure so the
+                    // user can fix a hook/index conflict and retry safely.
+                    if commit_task.await.is_ok() {
+                        cx.update(|cx| {
+                            panel_for_result.update(cx, |panel, cx| {
+                                panel.set_message(String::new(), cx);
+                            });
+                            changes_panel.update(cx, |panel, cx| {
+                                panel.commit_succeeded(&committed_paths, cx);
+                            });
+                            if !is_amend {
+                                if let Some(oid_hex) = previous_head_oid {
+                                    weak_workspace
+                                        .update(cx, |this, cx| {
+                                            this.push_undo(
+                                                msg!("workspace.undo.label.commit"),
+                                                UndoAction::SoftResetHead(oid_hex),
+                                                cx,
+                                            );
+                                        })
+                                        .ok();
+                                }
+                            }
+                        })?;
                     }
-                }
+                    anyhow::Ok(())
+                })
+                .detach();
             }
             CommitPanelEvent::GenerateAiMessage => {
                 start_ai_generation(this, &project, &ai, None, cx);
