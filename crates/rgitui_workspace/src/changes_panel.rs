@@ -711,6 +711,13 @@ impl ChangesPanel {
         if row.has_conflict() || self.pending.contains_key(&path) {
             return;
         }
+        // Keep the existing single-file path and its precise Git status
+        // messages; only multi-selection needs a batch operation.
+        if self.selected_paths.len() == 1 {
+            let action = row.toggle_event();
+            self.dispatch_stage_action(action, cx);
+            return;
+        }
         let target = if visual_state(row, &self.pending) == CheckState::Checked {
             CheckState::Unchecked
         } else {
