@@ -573,9 +573,21 @@ impl TextInput {
             }
         }
 
-        // Ordinary text (including ASCII and dead keys) is delivered through
-        // EntityInputHandler. Inserting it here too would duplicate characters
-        // on platforms that send both a keydown and a text-input event.
+        // Native IME handles ordinary text, including ASCII and dead keys.
+        // Password/token inputs deliberately keep the former keydown path so
+        // that their contents aren't exposed via OS composition services.
+        if self.masked && !self.read_only && !primary {
+            let text = event.keystroke.key_char.as_deref().or_else(|| {
+                (key.len() == 1 && key.is_ascii()).then_some(key)
+            });
+            if let Some(text) = text {
+                self.delete_selection();
+                self.text.insert_str(self.cursor, text);
+                self.cursor += text.len();
+                cx.emit(TextInputEvent::Changed(self.text.clone()));
+                cx.notify();
+            }
+        }
     }
 }
 
@@ -587,6 +599,9 @@ impl EntityInputHandler for TextInput {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
+        if self.masked {
+            return None;
+        }
         let range = utf16_range_to_utf8(&self.text, range_utf16);
         *actual_range = Some(
             utf8_to_utf16(&self.text, range.start)..utf8_to_utf16(&self.text, range.end),
@@ -697,7 +712,7 @@ impl EntityInputHandler for TextInput {
     }
 
     fn accepts_text_input(&self, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
-        !self.disabled && !self.read_only
+        !self.disabled && !self.read_only && !self.masked
     }
 }
 
@@ -777,7 +792,7 @@ impl Render for TextInput {
             gpui::DefiniteLength::Absolute(gpui::AbsoluteLength::Pixels(target_line_height));
 
         let mut highlights: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
-        if is_focused && !is_empty {
+        if is_focused && !is_empty && !self.masked {
             if self.marked_range.is_none() {
                 if let Some(range) = self.selection_range() {
                     if !range.is_empty() {
