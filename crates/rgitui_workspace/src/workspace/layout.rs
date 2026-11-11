@@ -231,6 +231,19 @@ impl Render for Workspace {
         {
             self.focus_panel(FocusedPanel::DiffViewer, window, cx);
         }
+        // Tab switching unmounts the old view. Rehome keyboard focus before
+        // dispatching shortcuts, rather than leaving it in a hidden entity.
+        if let Some(target) = self.tabs.get(self.active_tab).and_then(|tab| {
+            (tab.right_panel_mode != RightPanelMode::Details
+                && tab.changes_panel.read(cx).is_focused(window))
+                .then_some(if tab.right_panel_mode == RightPanelMode::History {
+                    FocusedPanel::Graph
+                } else {
+                    FocusedPanel::Sidebar
+                })
+        }) {
+            self.focus_panel(target, window, cx);
+        }
 
         // Apply the configured UI font size. Every `rgitui_ui` component sizes
         // itself in `rems`, so setting the window's rem size scales the whole
@@ -945,7 +958,8 @@ impl Render for Workspace {
                                     }),
                             ),
                     )
-                    // Center: loading indicator + graph (flex) + resize strip + diff viewer (fixed height)
+                    // Center: full-height diff and auxiliary views. The graph
+                    // lives in the right-hand History tab, never split vertically.
                     .child(
                         div()
                             .v_flex()
