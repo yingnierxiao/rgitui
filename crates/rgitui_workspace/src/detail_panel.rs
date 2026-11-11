@@ -453,6 +453,9 @@ impl FilteredFiles {
 pub struct DetailPanel {
     commit: Option<CommitInfo>,
     commit_diff: Option<Arc<CommitDiff>>,
+    /// In the History workspace use only the existing changed-files section.
+    /// Commit metadata is already represented by the selected history row.
+    files_only: bool,
     /// Provenance of `commit_diff`'s files — a commit or a stash. Set alongside
     /// the diff so file selections can report it without guessing.
     diff_source: Option<DiffSource>,
@@ -503,6 +506,7 @@ impl DetailPanel {
         Self {
             commit: None,
             commit_diff: None,
+            files_only: false,
             diff_source: None,
             cached_file_tree: None,
             visible_tree_rows: Arc::new(Vec::new()),
@@ -519,6 +523,14 @@ impl DetailPanel {
             contained_in: Vec::new(),
             contained_in_loading: false,
         }
+    }
+
+    /// The same file-list widget used by commit details, mounted beside the
+    /// main diff when browsing History. No extra diff store or Git operation.
+    pub fn new_file_list(cx: &mut Context<Self>) -> Self {
+        let mut panel = Self::new(cx);
+        panel.files_only = true;
+        panel
     }
 
     fn mark_copied(&mut self, field: &'static str, cx: &mut Context<Self>) {
@@ -1259,11 +1271,227 @@ impl DetailPanel {
             })
             .into_any_element()
     }
+    /// Shared files-only content for both the detailed metadata layout and
+    /// the compact file list beside the commit Diff.
+    fn render_changed_files(
+        &self,
+        mut content: gpui::Div,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let colors = cx.colors().clone();
+        // -- Changed Files Section --
+        if let (Some(diff), Some(cached)) = (&self.commit_diff, &self.cached_file_tree) {
+            let total_file_count = diff.files.len();
+            let filtered = self.filtered_files();
+            let is_searching = is_file_searching(self.file_search_active, &self.file_search_query);
+            let query_str = self.file_search_query.clone().unwrap_or_default();
+
+            let file_count_text: SharedString = if is_searching && !query_str.is_empty() {
+                let shown = filtered.len();
+                let total = total_file_count;
+                format!(
+                    "{} / {} file{} changed",
+                    shown,
+                    total,
+                    if total == 1 { "" } else { "s" }
+                )
+                .into()
+            } else {
+                format!(
+                    "{} file{} changed",
+                    total_file_count,
+                    if total_file_count == 1 { "" } else { "s" },
+                )
+                .into()
+            };
+
+            let total_additions = diff.total_additions;
+            let total_deletions = diff.total_deletions;
+
+            // Build the header with optional search input
+            let header_children = |cx: &mut Context<Self>| -> Vec<gpui::AnyElement> {
+                let mut children: Vec<gpui::AnyElement> = vec![
+                    Icon::new(IconName::File)
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted)
+                        .into_any_element(),
+                    Label::new(file_count_text.clone())
+                        .size(LabelSize::XSmall)
+                        .weight(gpui::FontWeight::SEMIBOLD)
+                        .color(Color::Muted)
+                        .into_any_element(),
+                ];
+
+                if is_searching {
+                    let search_input: gpui::AnyElement = div()
+                        .flex_1()
+                        .h_flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            Icon::new(IconName::Search)
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .h(px(24.))
+                                .overflow_hidden()
+                                .child(self.file_search_editor.clone()),
+                        )
+                        .child(
+                            IconButton::new("clear-search", IconName::X)
+                                .size(ButtonSize::Compact)
+                                .style(ButtonStyle::Transparent)
+                                .tooltip(t!("detail.clear_search.tooltip"))
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.clear_file_search(cx);
+                                }))
+                                .into_any_element(),
+                        )
+                        .into_any_element();
+                    children.push(search_input);
+                } else {
+                    children.push(div().flex_1().into_any_element());
+                }
+
+                // Diff stat
+                let diff_stat: gpui::AnyElement =
+                    DiffStat::new(total_additions, total_deletions).into_any_element();
+                children.push(diff_stat);
+
+                children
+            };
+
+            let header_children = header_children(cx);
+            let mut header = div()
+                .h_flex()
+                .w_full()
+                .flex_shrink_0()
+                .h(px(28.))
+                .px(px(10.))
+                .gap_2()
+                .items_center()
+                .bg(colors.surface_background)
+                .border_y_1()
+                .border_color(colors.border_variant);
+
+            for child in header_children {
+                header = header.child(child);
+            }
+            content = content.child(header);
+
+            // Show search hint when not searching and there are files
+            if !is_searching && total_file_count > 0 {
+                content = content.child(
+                    div()
+                        .h_flex()
+                        .w_full()
+                        .flex_shrink_0()
+                        .h(px(22.))
+                        .px_2()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            Label::new(t!("detail.search_files_hint"))
+                                .size(LabelSize::XSmall)
+                                .color(Color::Placeholder),
+                        )
+                        .child(div().flex_1()),
+                );
+            }
+
+            // Show "no results" when search has no matches
+            if is_searching && !query_str.is_empty() && filtered.is_empty() {
+                content = content.child(
+                    div()
+                        .h_flex()
+                        .w_full()
+                        .flex_shrink_0()
+                        .py_4()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            Label::new(format!("No files match \"{}\"", query_str))
+                                .size(LabelSize::XSmall)
+                                .color(Color::Placeholder),
+                        ),
+                );
+            }
+
+            // Render file list with search filter applied
+            if !filtered.is_empty() {
+                let searching = is_searching && !query_str.is_empty();
+                let file_list: gpui::AnyElement = match self.file_view_mode {
+                    FileViewMode::Flat => {
+                        self.render_flat_file_list_filtered(cached, &filtered, cx)
+                    }
+                    FileViewMode::Tree => {
+                        // While searching, show a match-filtered tree (matching files
+                        // plus their ancestor directories, fully expanded); otherwise
+                        // apply the collapsed-directory state.
+                        let visible = if searching {
+                            let matches = filtered.matched_set();
+                            Arc::new(searched_tree_row_indices(&cached.tree_rows, &matches))
+                        } else {
+                            self.visible_tree_rows.clone()
+                        };
+                        self.render_tree_file_list(&cached.tree_rows, visible, cx)
+                    }
+                };
+                content = content.child(file_list);
+            }
+        }
+
+        content
+    }
+
+
 }
 
 impl Render for DetailPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.colors().clone();
+        if self.files_only {
+            let mut content = div()
+                .v_flex()
+                .flex_1()
+                .min_h_0()
+                .overflow_hidden();
+            if self.commit_diff.is_some() {
+                content = self.render_changed_files(content, cx);
+            } else {
+                content = content.child(
+                    div()
+                        .px_3()
+                        .py_4()
+                        .child(
+                            Label::new(t!("detail.empty.description"))
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                        ),
+                );
+            }
+            return div()
+                .id("history-commit-file-list")
+                .track_focus(&self.focus_handle)
+                .map(|el| {
+                    keymap::bind_actions(
+                        el,
+                        "DetailPanel List",
+                        &["Menu", "DetailPanel"],
+                        cx,
+                        Self::dispatch_command,
+                    )
+                })
+                .v_flex()
+                .size_full()
+                .bg(colors.panel_background)
+                .child(content)
+                .into_any_element();
+        }
         let compact = &cx.global::<SettingsState>().settings().compactness;
 
         // Compactness-scaled spacing values for header and message cards
@@ -1843,171 +2071,7 @@ impl Render for DetailPanel {
         metadata = metadata.child(message_card);
         content = content.child(metadata);
 
-        // -- Changed Files Section --
-        if let (Some(diff), Some(cached)) = (&self.commit_diff, &self.cached_file_tree) {
-            let total_file_count = diff.files.len();
-            let filtered = self.filtered_files();
-            let is_searching = is_file_searching(self.file_search_active, &self.file_search_query);
-            let query_str = self.file_search_query.clone().unwrap_or_default();
-
-            let file_count_text: SharedString = if is_searching && !query_str.is_empty() {
-                let shown = filtered.len();
-                let total = total_file_count;
-                format!(
-                    "{} / {} file{} changed",
-                    shown,
-                    total,
-                    if total == 1 { "" } else { "s" }
-                )
-                .into()
-            } else {
-                format!(
-                    "{} file{} changed",
-                    total_file_count,
-                    if total_file_count == 1 { "" } else { "s" },
-                )
-                .into()
-            };
-
-            let total_additions = diff.total_additions;
-            let total_deletions = diff.total_deletions;
-
-            // Build the header with optional search input
-            let header_children = |cx: &mut Context<Self>| -> Vec<gpui::AnyElement> {
-                let mut children: Vec<gpui::AnyElement> = vec![
-                    Icon::new(IconName::File)
-                        .size(IconSize::XSmall)
-                        .color(Color::Muted)
-                        .into_any_element(),
-                    Label::new(file_count_text.clone())
-                        .size(LabelSize::XSmall)
-                        .weight(gpui::FontWeight::SEMIBOLD)
-                        .color(Color::Muted)
-                        .into_any_element(),
-                ];
-
-                if is_searching {
-                    let search_input: gpui::AnyElement = div()
-                        .flex_1()
-                        .h_flex()
-                        .items_center()
-                        .gap_1()
-                        .child(
-                            Icon::new(IconName::Search)
-                                .size(IconSize::XSmall)
-                                .color(Color::Muted),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .h(px(24.))
-                                .overflow_hidden()
-                                .child(self.file_search_editor.clone()),
-                        )
-                        .child(
-                            IconButton::new("clear-search", IconName::X)
-                                .size(ButtonSize::Compact)
-                                .style(ButtonStyle::Transparent)
-                                .tooltip(t!("detail.clear_search.tooltip"))
-                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    this.clear_file_search(cx);
-                                }))
-                                .into_any_element(),
-                        )
-                        .into_any_element();
-                    children.push(search_input);
-                } else {
-                    children.push(div().flex_1().into_any_element());
-                }
-
-                // Diff stat
-                let diff_stat: gpui::AnyElement =
-                    DiffStat::new(total_additions, total_deletions).into_any_element();
-                children.push(diff_stat);
-
-                children
-            };
-
-            let header_children = header_children(cx);
-            let mut header = div()
-                .h_flex()
-                .w_full()
-                .flex_shrink_0()
-                .h(px(28.))
-                .px(px(10.))
-                .gap_2()
-                .items_center()
-                .bg(colors.surface_background)
-                .border_y_1()
-                .border_color(colors.border_variant);
-
-            for child in header_children {
-                header = header.child(child);
-            }
-            content = content.child(header);
-
-            // Show search hint when not searching and there are files
-            if !is_searching && total_file_count > 0 {
-                content = content.child(
-                    div()
-                        .h_flex()
-                        .w_full()
-                        .flex_shrink_0()
-                        .h(px(22.))
-                        .px_2()
-                        .items_center()
-                        .gap_1()
-                        .child(
-                            Label::new(t!("detail.search_files_hint"))
-                                .size(LabelSize::XSmall)
-                                .color(Color::Placeholder),
-                        )
-                        .child(div().flex_1()),
-                );
-            }
-
-            // Show "no results" when search has no matches
-            if is_searching && !query_str.is_empty() && filtered.is_empty() {
-                content = content.child(
-                    div()
-                        .h_flex()
-                        .w_full()
-                        .flex_shrink_0()
-                        .py_4()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            Label::new(format!("No files match \"{}\"", query_str))
-                                .size(LabelSize::XSmall)
-                                .color(Color::Placeholder),
-                        ),
-                );
-            }
-
-            // Render file list with search filter applied
-            if !filtered.is_empty() {
-                let searching = is_searching && !query_str.is_empty();
-                let file_list: gpui::AnyElement = match self.file_view_mode {
-                    FileViewMode::Flat => {
-                        self.render_flat_file_list_filtered(cached, &filtered, cx)
-                    }
-                    FileViewMode::Tree => {
-                        // While searching, show a match-filtered tree (matching files
-                        // plus their ancestor directories, fully expanded); otherwise
-                        // apply the collapsed-directory state.
-                        let visible = if searching {
-                            let matches = filtered.matched_set();
-                            Arc::new(searched_tree_row_indices(&cached.tree_rows, &matches))
-                        } else {
-                            self.visible_tree_rows.clone()
-                        };
-                        self.render_tree_file_list(&cached.tree_rows, visible, cx)
-                    }
-                };
-                content = content.child(file_list);
-            }
-        }
+        content = self.render_changed_files(content, cx);
 
         panel = panel.child(content);
         panel.into_any_element()
