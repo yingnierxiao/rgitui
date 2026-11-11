@@ -276,6 +276,44 @@ fn selection_after_click(
     (selection, clicked_path)
 }
 
+/// Resolve a click against the path captured when the element was drawn.
+/// Sorting, filtering, and watcher refreshes may reorder virtual-list row
+/// numbers before an already queued click callback is dispatched.
+fn resolve_visible_index(
+    rows: &[ChangeRow],
+    visible: &[usize],
+    hint: usize,
+    path: &Path,
+) -> Option<usize> {
+    if visible
+        .get(hint)
+        .and_then(|index| rows.get(*index))
+        .is_some_and(|row| row.path.as_path() == path)
+    {
+        Some(hint)
+    } else {
+        visible
+            .iter()
+            .position(|index| rows[*index].path.as_path() == path)
+    }
+}
+
+/// A highlighted multi-selection is applied once. All subsequent normal
+/// checkbox clicks address individual files unless the user selects a range
+/// or group again.
+fn checkbox_target_paths(
+    rows: &[ChangeRow],
+    visible: &[usize],
+    selected: &HashSet<PathBuf>,
+    clicked: &Path,
+) -> Vec<PathBuf> {
+    if selected.len() > 1 && selected.contains(clicked) {
+        selected_virtual_paths(rows, visible, selected)
+    } else {
+        vec![clicked.to_path_buf()]
+    }
+}
+
 /// Resolve only visible selected rows. No stage/unstage operation is sent.
 fn selected_virtual_paths(
     rows: &[ChangeRow],
@@ -676,22 +714,8 @@ impl ChangesPanel {
         self.set_virtual_paths(&paths, desired, cx);
     }
 
-    /// Resolve a click against the path captured when the element was drawn.
-    /// A filter, sort, or watcher refresh can reorder virtual-list row numbers
-    /// before an already queued click callback is dispatched.
     fn visible_index_for_path(&self, hint: usize, path: &Path) -> Option<usize> {
-        if self
-            .visible
-            .get(hint)
-            .and_then(|index| self.rows.get(*index))
-            .is_some_and(|row| row.path.as_path() == path)
-        {
-            Some(hint)
-        } else {
-            self.visible
-                .iter()
-                .position(|index| self.rows[*index].path.as_path() == path)
-        }
+        resolve_visible_index(&self.rows, &self.visible, hint, path)
     }
 
     fn select_visible_path(
@@ -768,13 +792,12 @@ impl ChangesPanel {
         } else {
             CheckState::Checked
         };
-        let paths = if self.selected_paths.len() > 1
-            && self.selected_paths.contains(&path)
-        {
-            selected_virtual_paths(&self.rows, &self.visible, &self.selected_paths)
-        } else {
-            vec![path.clone()]
-        };
+        let paths = checkbox_target_paths(
+            &self.rows,
+            &self.visible,
+            &self.selected_paths,
+            &path,
+        );
         self.set_virtual_paths(&paths, target, cx);
 
         // A group checkbox click is a one-shot batch action. Keeping multiple
@@ -1279,6 +1302,57 @@ mod tests {
         assert!(!selection.contains(Path::new("hidden.rs")));
         assert!(selection.contains(Path::new("a.rs")));
         assert!(selection.contains(Path::new("z.rs")));
+    }
+
+    #[test]
+    fn rapid_checkbox_clicks_resolve_original_file_after_visible_reorder() {
+        let rows = combine_changes(
+            vec![],
+            vec![
+                file("a.rs", FileChangeKind::Modified),
+                file("b.rs", FileChangeKind::Modified),
+                file("c.rs", FileChangeKind::Modified),
+            ],
+        );
+        let original = vec![0, 1, 2];
+        assert_eq!(
+            resolve_visible_index(&rows, &original, 0, Path::new("a.rs")),
+            Some(0)
+        );
+        // A queued click for a.rs must not accidentally toggle c.rs after
+        // the list is sorted differently or another row gets filtered out.
+        let reordered = vec![2, 0, 1];
+        assert_eq!(
+            resolve_visible_index(&rows, &reordered, 0, Path::new("a.rs")),
+            Some(1)
+        );
+        assert_eq!(
+            resolve_visible_index(&rows, &[2, 1], 0, Path::new("a.rs")),
+            None
+        );
+    }
+
+    #[test]
+    fn rapid_checkbox_click_after_batch_only_targets_clicked_file() {
+        let rows = combine_changes(
+            vec![],
+            vec![
+                file("a.rs", FileChangeKind::Modified),
+                file("b.rs", FileChangeKind::Modified),
+                file("c.rs", FileChangeKind::Modified),
+            ],
+        );
+        let visible = vec![0, 1, 2];
+        let multi = HashSet::from([PathBuf::from("a.rs"), PathBuf::from("b.rs")]);
+        let first = checkbox_target_paths(&rows, &visible, &multi, Path::new("a.rs"));
+        assert_eq!(first, vec![PathBuf::from("a.rs"), PathBuf::from("b.rs")]);
+        // The checkbox handler collapses selection to the clicked file after
+        // batching. The next quick click cannot reverse all files at once.
+        let single = HashSet::from([PathBuf::from("a.rs")]);
+        let second = checkbox_target_paths(&rows, &visible, &single, Path::new("b.rs"));
+        assert_eq!(second, vec![PathBuf::from("b.rs")]);
+        let third = checkbox_target_paths(&rows, &visible, &single, Path::new("a.rs"));
+        assert_eq!(third, vec![PathBuf::from("a.rs")]);
     }
 
     #[test]
