@@ -34,6 +34,8 @@ pub(super) fn effective_refresh_commit_limit(configured: usize, loaded: usize) -
 struct WorktreeStatusCacheEntry {
     generation: u64,
     line_stats: bool,
+    /// Background line statistics are complete for this unchanged snapshot.
+    line_stats_ready: bool,
     fingerprint: u64,
     status: WorkingTreeStatus,
 }
@@ -89,6 +91,7 @@ impl WorktreeStatusCache {
             WorktreeStatusCacheEntry {
                 generation,
                 line_stats,
+                line_stats_ready: line_stats,
                 fingerprint,
                 status,
             },
@@ -1740,6 +1743,25 @@ impl GitProject {
         if targets.is_empty() {
             return;
         }
+        // A clean watcher refresh may reuse a status snapshot whose line
+        // counts are already complete. Do not re-run expensive diffs for
+        // every unrelated refs or UI notification.
+        let stats_ready = {
+            let cache = self.refresh_caches.worktree_status
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            cache.entries.get(&priority_worktree).is_some_and(|entry| {
+                entry.line_stats_ready
+                    && entry.generation == cache.generation(&priority_worktree)
+            })
+        };
+        if stats_ready {
+            log::debug!(
+                "deferred line stats: cached counts still valid for {}",
+                priority_worktree.display()
+            );
+            return;
+        }
         let cache = self.refresh_caches.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             // Prioritize the first visible rows, at most 24, to avoid a large
@@ -1761,7 +1783,7 @@ impl GitProject {
                         {
                             return;
                         }
-                        if project.apply_deferred_stats(&first) {
+                        if project.apply_deferred_stats(&first, false) {
                             cx.emit(GitProjectEvent::LineStatsUpdated);
                             cx.notify();
                         }
@@ -1781,7 +1803,7 @@ impl GitProject {
                         );
                         return;
                     }
-                    if project.apply_deferred_stats(&remaining) {
+                    if project.apply_deferred_stats(&remaining, true) {
                         cx.emit(GitProjectEvent::LineStatsUpdated);
                         cx.notify();
                     }
@@ -1790,7 +1812,7 @@ impl GitProject {
         }).detach();
     }
 
-    fn apply_deferred_stats(&mut self, results: &[LineStatResult]) -> bool {
+    fn apply_deferred_stats(&mut self, results: &[LineStatResult], complete: bool) -> bool {
         let mut changed = false;
         for (path, staged, unstaged) in results {
             if path == &self.repo_path {
@@ -1813,6 +1835,9 @@ impl GitProject {
                 .unwrap_or_else(|poison| poison.into_inner());
             if let Some(entry) = cache.entries.get_mut(path) {
                 merge_line_stats(&mut entry.status, staged, unstaged);
+                if complete {
+                    entry.line_stats_ready = true;
+                }
             }
         }
         changed
