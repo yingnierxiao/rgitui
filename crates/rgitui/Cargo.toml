@@ -13,6 +13,9 @@ path = "src/main.rs"
 
 [features]
 default = []
+# Opt-in Windows console subsystem for profiling Git pull/fetch/merge logs
+# with PowerShell Tee-Object. Regular release builds remain GUI-only.
+console-logs = []
 # Compiles in the performance and memory harness, driven at runtime by the
 # `RGITUI_PERF` environment variable. Off by default: the shipped binary carries
 # none of this, and a normal build does not even resolve the dependency.
