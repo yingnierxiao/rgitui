@@ -941,6 +941,15 @@ impl GitProject {
         self.refresh_generation = self.refresh_generation.wrapping_add(1);
     }
 
+    /// A paginated commit-list append changes what the UI displays even though
+    /// it does not go through `apply_refresh_data`. Invalidate both generations
+    /// so an older watcher refresh cannot replace 2,000 loaded commits with
+    /// a 1,000-commit snapshot that it started before the user paged.
+    pub(super) fn note_commit_history_extended(&mut self) {
+        self.commit_history_generation = self.commit_history_generation.wrapping_add(1);
+        self.refresh_generation = self.refresh_generation.wrapping_add(1);
+    }
+
     /// The current refresh generation, bumped on every `apply_refresh_data`.
     /// The watcher captures this before gathering and drops its result if the
     /// generation advanced in the meantime (a newer full refresh won).
@@ -1063,8 +1072,7 @@ impl GitProject {
                     }
                     this.commit_offset = this.recent_commits.len();
                     this.has_more_commits = has_more;
-                    this.commit_history_generation =
-                        this.commit_history_generation.wrapping_add(1);
+                    this.note_commit_history_extended();
                     // Pagination replaces the Arc that the weak history cache
                     // referred to. Re-seed it only if refs did not change while
                     // git log was running, otherwise the next refresh must
@@ -2046,6 +2054,21 @@ mod tests {
     fn normalize_relative_path_unchanged() {
         let path = PathBuf::from("./my-repo");
         assert_eq!(normalize_repo_path(path.clone()), path);
+    }
+
+    #[test]
+    fn paginating_history_invalidates_older_watcher_snapshots() {
+        let mut project = GitProject::empty_at(PathBuf::from("repo"));
+        let before_refresh = project.refresh_generation;
+        let before_history = project.commit_history_generation;
+
+        project.note_commit_history_extended();
+
+        assert_eq!(project.refresh_generation, before_refresh.wrapping_add(1));
+        assert_eq!(
+            project.commit_history_generation,
+            before_history.wrapping_add(1)
+        );
     }
 
     #[test]

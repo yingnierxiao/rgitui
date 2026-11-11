@@ -1726,8 +1726,7 @@ impl GitProject {
                         }
                         this.commit_offset = this.recent_commits.len();
                         this.has_more_commits = has_more;
-                        this.commit_history_generation =
-                            this.commit_history_generation.wrapping_add(1);
+                        this.note_commit_history_extended();
                         // Reattach the cache to the appended Arc so a subsequent
                         // Pull/Watcher refresh does not re-run git log.
                         if cache_fingerprint.is_some()
