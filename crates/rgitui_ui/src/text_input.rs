@@ -1,8 +1,9 @@
 use gpui::prelude::*;
 use gpui::{
-    canvas, div, fill, px, rems, size, App, Bounds, Context, EventEmitter, FocusHandle, Focusable,
-    HighlightStyle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Render, SharedString, Size, StyledText, TextLayout, Window,
+    canvas, div, fill, px, rems, size, App, Bounds, Context, ElementInputHandler,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, HighlightStyle, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, SharedString,
+    Size, StyledText, TextLayout, UTF16Selection, UnderlineStyle, Window,
 };
 use rgitui_theme::{ActiveTheme, Color};
 use std::ops::Range;
@@ -18,11 +19,31 @@ pub enum TextInputEvent {
 
 impl EventEmitter<TextInputEvent> for TextInput {}
 
-// TODO(audit) QUAL-09: this hand-rolls a text editor over on_key_down/key_char
-// and implements no EntityInputHandler, so OS-level IME/dead-key/composition is
-// not wired up. Migrate to wrap GPUI's Editor (single-line mode) or implement
-// EntityInputHandler (replace_text_in_range / replace_and_mark_text_in_range /
-// marked_text_range) and register it via window.register_input_handler.
+/// Map Windows IME UTF-16 offsets to UTF-8 byte boundaries without splitting
+/// a surrogate pair (Chinese, emoji and other non-ASCII characters).
+fn utf16_to_utf8(text: &str, offset: usize) -> usize {
+    let mut units = 0;
+    for (index, ch) in text.char_indices() {
+        if units + ch.len_utf16() > offset {
+            return index;
+        }
+        units += ch.len_utf16();
+    }
+    text.len()
+}
+
+fn utf8_to_utf16(text: &str, offset: usize) -> usize {
+    text.char_indices()
+        .take_while(|(index, _)| *index < offset)
+        .map(|(_, ch)| ch.len_utf16())
+        .sum()
+}
+
+fn utf16_range_to_utf8(text: &str, range: Range<usize>) -> Range<usize> {
+    let start = utf16_to_utf8(text, range.start);
+    let end = utf16_to_utf8(text, range.end);
+    start.min(end)..start.max(end)
+}
 /// What an empty [`TextInput`] shows.
 enum Placeholder {
     Text(SharedString),
@@ -36,6 +57,8 @@ pub struct TextInput {
     placeholder: Placeholder,
     cursor: usize,
     selection: Option<usize>,
+    /// Temporary IME preedit bytes, underlined until the user commits a candidate.
+    marked_range: Option<Range<usize>>,
     dragging: bool,
     focus_handle: FocusHandle,
     text_layout: TextLayout,
@@ -57,6 +80,7 @@ impl TextInput {
             placeholder: Placeholder::Text(SharedString::default()),
             cursor: 0,
             selection: None,
+            marked_range: None,
             dragging: false,
             focus_handle: cx.focus_handle(),
             text_layout: TextLayout::default(),
@@ -93,6 +117,7 @@ impl TextInput {
         self.text = t;
         self.cursor = self.text.len();
         self.selection = None;
+        self.marked_range = None;
         cx.notify();
     }
 
@@ -129,6 +154,7 @@ impl TextInput {
         self.text.clear();
         self.cursor = 0;
         self.selection = None;
+        self.marked_range = None;
         cx.notify();
     }
 
@@ -143,6 +169,62 @@ impl TextInput {
     fn selection_range(&self) -> Option<Range<usize>> {
         self.selection
             .map(|sel| sel.min(self.cursor)..sel.max(self.cursor))
+    }
+
+    fn replace_native_text(
+        &mut self,
+        requested_range: Option<Range<usize>>,
+        new_text: &str,
+        selected_range_utf16: Option<Range<usize>>,
+        is_marked: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.disabled || self.read_only {
+            return;
+        }
+
+        let replacement = requested_range
+            .map(|range| utf16_range_to_utf8(&self.text, range))
+            .or_else(|| self.marked_range.clone())
+            .or_else(|| self.selection_range())
+            .unwrap_or(self.cursor..self.cursor);
+
+        // The summary and other single-line fields must never gain newlines
+        // from IME/paste; descriptions keep the full text.
+        let insert = if self.multiline {
+            new_text
+        } else {
+            new_text.split(['\r', '\n']).next().unwrap_or("")
+        };
+        let start_utf16 = utf8_to_utf16(&self.text, replacement.start);
+        let insert_utf16_len = insert.encode_utf16().count();
+
+        self.text.replace_range(replacement.clone(), insert);
+        let inserted_end = replacement.start + insert.len();
+        self.marked_range = if is_marked && !insert.is_empty() {
+            Some(replacement.start..inserted_end)
+        } else {
+            None
+        };
+
+        if let Some(selected) = selected_range_utf16 {
+            let start = utf16_to_utf8(
+                &self.text,
+                start_utf16 + selected.start.min(insert_utf16_len),
+            );
+            let end = utf16_to_utf8(
+                &self.text,
+                start_utf16 + selected.end.min(insert_utf16_len),
+            );
+            self.cursor = end;
+            self.selection = (start != end).then_some(start);
+        } else {
+            self.cursor = inserted_end;
+            self.selection = None;
+        }
+
+        cx.emit(TextInputEvent::Changed(self.text.clone()));
+        cx.notify();
     }
 
     fn delete_selection(&mut self) -> bool {
@@ -325,6 +407,13 @@ impl TextInput {
         if self.disabled {
             return;
         }
+        // During IME composition Enter selects a candidate, Escape cancels it,
+        // and arrows navigate the candidate window. They must not trigger
+        // commit submission or mutate our buffer as ordinary keyboard input.
+        if self.marked_range.is_some() {
+            cx.propagate();
+            return;
+        }
 
         let key = event.keystroke.key.as_str();
         let primary = event.keystroke.modifiers.secondary();
@@ -485,30 +574,131 @@ impl TextInput {
             }
         }
 
-        if self.read_only {
-            return;
-        }
+        // Ordinary text (including ASCII and dead keys) is delivered through
+        // EntityInputHandler. Inserting it here too would duplicate characters
+        // on platforms that send both a keydown and a text-input event.
+    }
+}
 
-        if let Some(kc) = &event.keystroke.key_char {
-            if !primary {
-                self.delete_selection();
-                self.text.insert_str(self.cursor, kc);
-                self.cursor += kc.len();
-                cx.emit(TextInputEvent::Changed(self.text.clone()));
-                cx.notify();
-            }
-        } else if key.len() == 1 && !primary {
-            let Some(ch) = key.chars().next() else {
-                return;
-            };
-            if ch.is_ascii_graphic() || ch == ' ' {
-                self.delete_selection();
-                self.text.insert(self.cursor, ch);
-                self.cursor += ch.len_utf8();
-                cx.emit(TextInputEvent::Changed(self.text.clone()));
-                cx.notify();
-            }
-        }
+impl EntityInputHandler for TextInput {
+    fn text_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        actual_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let range = utf16_range_to_utf8(&self.text, range_utf16);
+        *actual_range = Some(
+            utf8_to_utf16(&self.text, range.start)..utf8_to_utf16(&self.text, range.end),
+        );
+        Some(self.text[range].to_string())
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        let range = self.selection_range().unwrap_or(self.cursor..self.cursor);
+        Some(UTF16Selection {
+            range: utf8_to_utf16(&self.text, range.start)
+                ..utf8_to_utf16(&self.text, range.end),
+            reversed: self.selection.is_some_and(|anchor| self.cursor < anchor),
+        })
+    }
+
+    fn set_selected_text_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = utf16_range_to_utf8(&self.text, range_utf16);
+        self.cursor = range.end;
+        self.selection = (range.start != range.end).then_some(range.start);
+        cx.notify();
+    }
+
+    fn text_length_utf16(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        Some(self.text.encode_utf16().count())
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        self.marked_range.as_ref().map(|range| {
+            utf8_to_utf16(&self.text, range.start)..utf8_to_utf16(&self.text, range.end)
+        })
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.marked_range = None;
+        cx.notify();
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.replace_native_text(range_utf16, new_text, None, false, cx);
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_range_utf16: Option<Range<usize>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.replace_native_text(
+            range_utf16,
+            new_text,
+            new_selected_range_utf16,
+            true,
+            cx,
+        );
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        element_bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        let range = utf16_range_to_utf8(&self.text, range_utf16);
+        let position = self.text_layout.position_for_index(range.start)?;
+        // Give the IME a screen-space caret rectangle for its candidate list,
+        // not the whole input field (which positions candidates incorrectly).
+        Some(Bounds {
+            origin: position,
+            size: size(px(1.5), element_bounds.size.height.min(px(24.0))),
+        })
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        point: gpui::Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        Some(utf8_to_utf16(&self.text, self.index_from_position(point)))
+    }
+
+    fn accepts_text_input(&self, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
+        !self.disabled && !self.read_only
     }
 }
 
@@ -590,6 +780,19 @@ impl Render for TextInput {
                     highlights.push((range, selection_hl));
                 }
             }
+            if let Some(range) = self.marked_range.clone() {
+                highlights.push((
+                    range,
+                    HighlightStyle {
+                        underline: Some(UnderlineStyle {
+                            thickness: px(1.0),
+                            color: Some(colors.text),
+                            wavy: false,
+                        }),
+                        ..Default::default()
+                    },
+                ));
+            }
         }
 
         let display_text: SharedString = if is_empty {
@@ -609,10 +812,19 @@ impl Render for TextInput {
         };
         self.text_layout = text_element.layout().clone();
         let layout_ref = self.text_layout.clone();
+        let input_entity = cx.entity();
+        let ime_focus = self.focus_handle.clone();
 
         let cursor_overlay = canvas(
             move |_, _, _| Size::<Pixels>::default(),
-            move |bounds, _, window, _cx| {
+            move |bounds, _, window, cx| {
+                // Windows TSF/IME and macOS input methods use this native
+                // handler. Register during paint, as required by this GPUI rev.
+                window.handle_input(
+                    &ime_focus,
+                    ElementInputHandler::new(bounds, input_entity.clone()),
+                    cx,
+                );
                 if !is_focused {
                     return;
                 }
@@ -695,5 +907,34 @@ impl Render for TextInput {
         }
 
         container
+    }
+}
+
+#[cfg(test)]
+mod ime_tests {
+    use super::{utf16_range_to_utf8, utf16_to_utf8, utf8_to_utf16};
+
+    #[test]
+    fn utf16_offsets_handle_chinese_and_emoji() {
+        let text = "A中🙂B";
+        assert_eq!(text.len(), 9);
+        assert_eq!(utf16_to_utf8(text, 0), 0);
+        assert_eq!(utf16_to_utf8(text, 1), 1);
+        assert_eq!(utf16_to_utf8(text, 2), 4);
+        assert_eq!(utf16_to_utf8(text, 3), 4);
+        assert_eq!(utf16_to_utf8(text, 4), 8);
+        assert_eq!(utf16_to_utf8(text, 5), 9);
+        assert_eq!(utf8_to_utf16(text, 1), 1);
+        assert_eq!(utf8_to_utf16(text, 4), 2);
+        assert_eq!(utf8_to_utf16(text, 8), 4);
+        assert_eq!(utf16_range_to_utf8(text, 1..4), 1..8);
+    }
+
+    #[test]
+    fn utf16_offsets_are_clamped_to_valid_boundaries() {
+        let text = "中文";
+        assert_eq!(utf16_to_utf8(text, usize::MAX), text.len());
+        assert_eq!(utf16_range_to_utf8(text, 5..1), 3..6);
+        assert_eq!(utf8_to_utf16(text, text.len()), 2);
     }
 }
