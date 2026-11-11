@@ -674,7 +674,7 @@ impl EntityInputHandler for TextInput {
     fn bounds_for_range(
         &mut self,
         range_utf16: Range<usize>,
-        element_bounds: Bounds<Pixels>,
+        _element_bounds: Bounds<Pixels>,
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
@@ -684,7 +684,7 @@ impl EntityInputHandler for TextInput {
         // not the whole input field (which positions candidates incorrectly).
         Some(Bounds {
             origin: position,
-            size: size(px(1.5), element_bounds.size.height.min(px(24.0))),
+            size: size(px(1.5), px(24.0)),
         })
     }
 
