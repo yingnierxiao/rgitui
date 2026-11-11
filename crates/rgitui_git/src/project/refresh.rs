@@ -42,6 +42,10 @@ struct WorktreeStatusCacheEntry {
 pub(super) struct WorktreeStatusCache {
     entries: HashMap<PathBuf, WorktreeStatusCacheEntry>,
     generations: HashMap<PathBuf, u64>,
+    /// A per-checkout single-flight mutex. Two callers invalidated by the
+    /// same watcher/operation burst should not both spend seconds scanning
+    /// the same files with libgit2.
+    scan_locks: HashMap<PathBuf, Arc<Mutex<()>>>,
 }
 
 impl WorktreeStatusCache {
@@ -751,6 +755,28 @@ fn compute_working_tree_status(
     line_stats: bool,
 ) -> Result<WorkingTreeStatus> {
     let total_started = std::time::Instant::now();
+    // Hold a per-worktree gate across the complete status pass, not the
+    // global cache lock. Concurrent refreshes of other worktrees remain
+    // independent. Rechecking the cache after acquiring the gate makes the
+    // second caller reuse the first caller's completed status immediately.
+    let scan_lock = cache.map(|cache| {
+        let mut guard = cache.lock().unwrap_or_else(|error| error.into_inner());
+        guard.scan_locks
+            .entry(repo_path.to_path_buf())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    });
+    let wait_started = std::time::Instant::now();
+    let _single_flight = scan_lock.as_ref().map(|lock| {
+        lock.lock().unwrap_or_else(|error| error.into_inner())
+    });
+    if scan_lock.is_some() && wait_started.elapsed() > std::time::Duration::from_millis(10) {
+        log::info!(
+            "worktree status single-flight wait: path={} wait={:?}",
+            repo_path.display(),
+            wait_started.elapsed()
+        );
+    }
     let cache_generation = if let Some(cache) = cache {
         let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
         let generation = guard.generation(repo_path);
@@ -3283,6 +3309,29 @@ mod commit_log_reuse_tests {
         let next = gather(&repo, &caches, effective_limit);
         assert!(Arc::ptr_eq(&loaded, &next.recent_commits));
         assert_eq!(next.recent_commits.len(), 5);
+    }
+
+    #[test]
+    fn concurrent_status_refreshes_reuse_a_single_checkout_scan() {
+        let repo = TempRepo::with_commits(2);
+        repo.write_file("concurrent.txt", "changed\n");
+        let cache = Mutex::new(WorktreeStatusCache::default());
+        // Give two threads the same invalidation generation.
+        let (first, second) = std::thread::scope(|scope| {
+            let a = scope.spawn(|| {
+                compute_working_tree_status(repo.path(), Some(&cache), false).unwrap()
+            });
+            let b = scope.spawn(|| {
+                compute_working_tree_status(repo.path(), Some(&cache), false).unwrap()
+            });
+            (a.join().unwrap(), b.join().unwrap())
+        });
+        assert_eq!(first, second);
+        assert_eq!(
+            cache.lock().unwrap().scan_locks.len(),
+            1,
+            "both concurrent callers must share a single per-worktree gate"
+        );
     }
 
     #[test]
