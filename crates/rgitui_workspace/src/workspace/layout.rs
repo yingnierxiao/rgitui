@@ -1337,7 +1337,7 @@ impl Render for Workspace {
                                                     .ok();
                                             })
                                             .child(
-                                                Label::new(t!("workspace.bottom.history"))
+                                                Label::new(t!("workspace.history.tab"))
                                                     .size(LabelSize::XSmall)
                                                     .weight(gpui::FontWeight::SEMIBOLD)
                                                     .color(if is_history {
