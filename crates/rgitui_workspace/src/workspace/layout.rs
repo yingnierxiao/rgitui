@@ -1203,11 +1203,48 @@ impl Render for Workspace {
                                     })
                                     .child(tab_bar)
                                     .when(bottom_panel_mode == BottomPanelMode::Diff, |el| {
+                                        // History has two independent selections:
+                                        // the right graph picks a commit, while
+                                        // this compact file list chooses which
+                                        // file's diff fills the center.
                                         el.child(
-                                            active_tab
-                                                .diff_viewer
-                                                .clone()
-                                                .cached(fill_rest_of_column()),
+                                            div()
+                                                .h_flex()
+                                                .flex_1()
+                                                .min_h_0()
+                                                .min_w_0()
+                                                .when(
+                                                    active_tab.right_panel_mode
+                                                        == RightPanelMode::History,
+                                                    |el| {
+                                                        el.child(
+                                                            div()
+                                                                .w(px(255.))
+                                                                .h_full()
+                                                                .flex_shrink_0()
+                                                                .border_r_1()
+                                                                .border_color(colors.border_variant)
+                                                                .child(
+                                                                    active_tab
+                                                                        .detail_panel
+                                                                        .clone()
+                                                                        .cached(fill_container()),
+                                                                ),
+                                                        )
+                                                    },
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .h_full()
+                                                        .child(
+                                                            active_tab
+                                                                .diff_viewer
+                                                                .clone()
+                                                                .cached(fill_container()),
+                                                        ),
+                                                ),
                                         )
                                     })
                                     .when(bottom_panel_mode == BottomPanelMode::Blame, |el| {
