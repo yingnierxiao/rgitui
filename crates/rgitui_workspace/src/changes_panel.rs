@@ -460,7 +460,10 @@ impl ChangesPanel {
             scroll: UniformListScrollHandle::new(),
             focus_handle: cx.focus_handle(),
             context_menu: None,
-            container_bounds: Bounds::new(Point::new(px(0.), px(0.)), Size::new(px(0.), px(0.))),
+            container_bounds: Bounds::new(
+                Point::new(px(0.), px(0.)),
+                Size::new(px(0.), px(0.)),
+            ),
         }
     }
 
@@ -551,6 +554,13 @@ impl ChangesPanel {
         if self.selected_path.as_deref() == Some(path) {
             self.selected_path = None;
             self.selected_row = None;
+        }
+        if self
+            .context_menu
+            .as_ref()
+            .is_some_and(|menu| menu.path == path)
+        {
+            self.context_menu = None;
         }
         self.rebuild_filter();
         cx.emit(ChangesPanelEvent::SelectionChanged(self.staged_count));
@@ -1397,7 +1407,11 @@ impl Render for ChangesPanel {
                         );
                     }
 
-                    if row.unstaged.is_some() {
+                    // The existing DiscardFile operation restores to HEAD and
+                    // would erase staged content too. Offer it only when the
+                    // file has no staged side; partially staged files can be
+                    // unstaged first, then safely discarded.
+                    if row.unstaged.is_some() && row.staged.is_none() {
                         let sidebar = weak_sidebar.clone();
                         let panel = weak_panel.clone();
                         let path = row.path.to_string_lossy().to_string();
@@ -1490,8 +1504,12 @@ impl Render for ChangesPanel {
                     .absolute()
                     .left(menu_x)
                     .top(menu_y)
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_mouse_down(MouseButton::Right, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.context_menu = None;
                         cx.notify();
