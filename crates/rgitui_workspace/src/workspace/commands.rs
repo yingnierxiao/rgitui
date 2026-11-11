@@ -230,15 +230,11 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Heightens (positive `delta`) or shortens the bottom diff viewer.
-    ///
-    /// Steps from the height on screen rather than the stored one, which can
-    /// be taller than a window that has since shrunk has room for.
+    /// The diff now occupies the full center height. Preserve existing
+    /// Grow/Shrink Diff shortcuts by changing the center width instead:
+    /// growing the diff narrows the right-hand Changes/History panel.
     fn resize_diff_viewer(&mut self, delta: f32, cx: &mut Context<Self>) {
-        let current = self.fit_diff_viewer_height(self.layout.diff_viewer_height);
-        self.layout.diff_viewer_height = self.fit_diff_viewer_height(current + delta);
-        self.schedule_layout_save(cx);
-        cx.notify();
+        self.resize_detail_panel(-delta, cx);
     }
 
     /// Reveal History or Changes instead of splitting commit graph and diff
