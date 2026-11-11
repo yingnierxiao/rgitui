@@ -17,7 +17,11 @@ use super::{
 /// A successful "Already up to date" pull cannot change the checked-out
 /// index/worktree when AutoStash is disabled. Conflicts and AutoStash always
 /// require a fresh status scan.
-fn pull_can_reuse_status_cache(auto_stash: bool, is_conflict: bool, already_up_to_date: bool) -> bool {
+fn pull_can_reuse_status_cache(
+    auto_stash: bool,
+    is_conflict: bool,
+    already_up_to_date: bool,
+) -> bool {
     !auto_stash && !is_conflict && already_up_to_date
 }
 
