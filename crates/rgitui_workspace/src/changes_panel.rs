@@ -260,10 +260,7 @@ fn visual_state(row: &ChangeRow, pending: &HashMap<PathBuf, CheckState>) -> Chec
 
 /// Clear optimistic states only after the refreshed index agrees with them.
 /// An earlier watcher snapshot must not undo a checkbox while Git is still working.
-fn reconcile_pending(
-    rows: &[ChangeRow],
-    pending: &mut HashMap<PathBuf, CheckState>,
-) -> bool {
+fn reconcile_pending(rows: &[ChangeRow], pending: &mut HashMap<PathBuf, CheckState>) -> bool {
     let previous_count = pending.len();
     pending.retain(|path, desired| {
         rows.binary_search_by(|row| row.path.cmp(path))
@@ -968,35 +965,23 @@ mod tests {
 
     #[test]
     fn optimistic_states_reconcile_only_after_index_confirms_them() {
-        let rows = combine_changes(
-            vec![],
-            vec![file("a.rs", FileChangeKind::Modified)],
-        );
+        let rows = combine_changes(vec![], vec![file("a.rs", FileChangeKind::Modified)]);
         let mut pending = HashMap::from([(PathBuf::from("a.rs"), CheckState::Checked)]);
         assert_eq!(visual_state(&rows[0], &pending), CheckState::Checked);
         assert!(!reconcile_pending(&rows, &mut pending));
         assert_eq!(visual_header_state(&rows, &[0], &pending), CheckState::Checked);
-        let confirmed = combine_changes(
-            vec![file("a.rs", FileChangeKind::Modified)],
-            vec![],
-        );
+        let confirmed = combine_changes(vec![file("a.rs", FileChangeKind::Modified)], vec![]);
         assert!(reconcile_pending(&confirmed, &mut pending));
         assert!(pending.is_empty());
     }
 
     #[test]
     fn optimistic_unstage_waits_for_actual_index_change() {
-        let staged = combine_changes(
-            vec![file("a.rs", FileChangeKind::Modified)],
-            vec![],
-        );
+        let staged = combine_changes(vec![file("a.rs", FileChangeKind::Modified)], vec![]);
         let mut pending = HashMap::from([(PathBuf::from("a.rs"), CheckState::Unchecked)]);
         assert!(!reconcile_pending(&staged, &mut pending));
         assert_eq!(visual_state(&staged[0], &pending), CheckState::Unchecked);
-        let unstaged = combine_changes(
-            vec![],
-            vec![file("a.rs", FileChangeKind::Modified)],
-        );
+        let unstaged = combine_changes(vec![], vec![file("a.rs", FileChangeKind::Modified)]);
         assert!(reconcile_pending(&unstaged, &mut pending));
         assert!(pending.is_empty());
     }
