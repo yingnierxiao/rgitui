@@ -14,6 +14,13 @@ use super::{
     head_branch_name, pull_target, push_target, GitProject, GitProjectEvent, RefreshData,
 };
 
+/// A successful "Already up to date" pull cannot change the checked-out
+/// index/worktree when AutoStash is disabled. Conflicts and AutoStash always
+/// require a fresh status scan.
+fn pull_can_reuse_status_cache(auto_stash: bool, is_conflict: bool, already_up_to_date: bool) -> bool {
+    !auto_stash && !is_conflict && already_up_to_date
+}
+
 /// Open the repository handle for a specific working tree. Network operations
 /// resolve their branch and upstream from *this* checkout, which is what makes
 /// pushing from an inspected worktree push that worktree's branch rather than
@@ -366,7 +373,7 @@ impl GitProject {
                                     // A successful no-op pull without AutoStash cannot
                                     // alter the checked-out files or index. Preserve the
                                     // last validated status snapshot in this narrow case.
-                                    (msg, false, details, already_up_to_date && !auto_stash)
+                                    (msg, false, details, pull_can_reuse_status_cache(auto_stash, false, already_up_to_date))
                                 }
                             }
                             Err(e) => {
@@ -395,8 +402,8 @@ impl GitProject {
                     // Use the same caches as watcher refreshes and defer graph walks.
                     // The old full refresh performed libgit2 ahead/behind walks for
                     // every local branch before the Pull operation could complete.
-                    // Pull may rewrite the checked-out files and index without
-                    // relying on the filesystem watcher to deliver every event.
+                    // A non-no-op Pull may rewrite the checked-out files and index
+                    // without relying on the filesystem watcher to deliver every event.
                     if !preserve_status_cache {
                         refresh_caches.mark_worktree_status_dirty(&task_worktree_path);
                     } else {
@@ -659,5 +666,18 @@ impl GitProject {
                 })
             })?
         })
+    }
+}
+
+#[cfg(test)]
+mod pull_status_cache_tests {
+    use super::pull_can_reuse_status_cache;
+
+    #[test]
+    fn only_noop_pull_without_autostash_or_conflict_reuses_status_cache() {
+        assert!(pull_can_reuse_status_cache(false, false, true));
+        assert!(!pull_can_reuse_status_cache(true, false, true));
+        assert!(!pull_can_reuse_status_cache(false, true, true));
+        assert!(!pull_can_reuse_status_cache(false, false, false));
     }
 }
