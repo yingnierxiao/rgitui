@@ -751,9 +751,12 @@ impl DetailPanel {
         }
         self.cached_file_tree = Some(cached_file_tree);
         self.commit = Some(commit);
+        // The workspace displays the first changed file's diff by default.
+        // Highlight that same file in the commit file list, so both panes
+        // describe the same selection before the user's first click.
+        self.selected_file_index = (!diff.files.is_empty()).then_some(0);
         self.commit_diff = Some(diff);
         self.diff_source = Some(source);
-        self.selected_file_index = None;
         self.file_search_query = None;
         self.file_search_active = false;
         self.collapsed_dirs.clear();
