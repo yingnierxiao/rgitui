@@ -1700,17 +1700,19 @@ impl GitProject {
             staged_paths: status.staged.iter().map(|file| file.path.clone()).collect(),
             unstaged_paths: status.unstaged.iter().map(|file| file.path.clone()).collect(),
         };
-        if !self.status.staged.is_empty() || !self.status.unstaged.is_empty() {
-            targets.push(make_target(self.repo_path.clone(), &self.status));
-        }
-        for worktree in &self.worktrees {
-            if worktree.is_current {
-                continue;
-            }
-            if let Some(status) = &worktree.status {
-                if !status.staged.is_empty() || !status.unstaged.is_empty() {
-                    targets.push(make_target(worktree.path.clone(), status));
-                }
+        // Compute line counts only for the checkout currently inspected by
+        // this tab. Background worktrees must never consume CPU and disk IO
+        // merely to populate hidden counters.
+        let displayed_status = if priority_worktree == self.repo_path {
+            Some(self.status.as_ref())
+        } else {
+            self.worktrees.iter()
+                .find(|worktree| worktree.path == priority_worktree)
+                .and_then(|worktree| worktree.status.as_ref())
+        };
+        if let Some(status) = displayed_status {
+            if !status.staged.is_empty() || !status.unstaged.is_empty() {
+                targets.push(make_target(priority_worktree.clone(), status));
             }
         }
         if targets.is_empty() {
@@ -1780,6 +1782,15 @@ impl GitProject {
                         changed |= merge_line_stats(status, staged, unstaged);
                     }
                 }
+            }
+            // Preserve the newly calculated line counts in the clean status
+            // snapshot as well. Otherwise a lightweight status refresh would
+            // reuse its old zero-count values and make the UI counters blink.
+            let mut cache = self.refresh_caches.worktree_status
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if let Some(entry) = cache.entries.get_mut(path) {
+                merge_line_stats(&mut entry.status, staged, unstaged);
             }
         }
         changed
