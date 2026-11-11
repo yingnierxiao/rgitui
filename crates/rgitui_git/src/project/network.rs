@@ -313,11 +313,11 @@ impl GitProject {
         );
         self.note_operation_worktree(operation_id, worktree_path);
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let result: anyhow::Result<(Message, bool, Option<String>, RefreshData)> = cx
+            let result: anyhow::Result<(Message, bool, Option<String>, bool, RefreshData)> = cx
                 .background_executor()
                 .spawn(async move {
                     let operation_started = std::time::Instant::now();
-                    let (msg, is_conflict, details) = {
+                    let (msg, is_conflict, details, preserve_status_cache) = {
                         // Let Git reject only changes that would actually be overwritten.
                         validate_remote_name(&task_remote_name)?;
                         validate_branch_name(&task_branch_name)?;
@@ -332,11 +332,10 @@ impl GitProject {
                         );
                         match pull_result {
                             Ok(details) => {
-                                let msg = if details
+                                let already_up_to_date = details
                                     .as_deref()
-                                    .map(|text| text.contains("Already up to date."))
-                                    .unwrap_or(false)
-                                {
+                                    .is_some_and(|text| text.contains("Already up to date."));
+                                let msg = if already_up_to_date {
                                     msg!(
                                         "git.pull.up_to_date",
                                         branch = &task_branch_name,
@@ -362,9 +361,12 @@ impl GitProject {
                                         remote = &task_remote_name,
                                         branch = &task_branch_name
                                     );
-                                    (msg, true, details)
+                                    (msg, true, details, false)
                                 } else {
-                                    (msg, false, details)
+                                    // A successful no-op pull without AutoStash cannot
+                                    // alter the checked-out files or index. Preserve the
+                                    // last validated status snapshot in this narrow case.
+                                    (msg, false, details, already_up_to_date && !auto_stash)
                                 }
                             }
                             Err(e) => {
@@ -382,7 +384,7 @@ impl GitProject {
                                         remote = &task_remote_name,
                                         branch = &task_branch_name
                                     );
-                                    (msg, true, Some(error_msg))
+                                    (msg, true, Some(error_msg), false)
                                 } else {
                                     return Err(e);
                                 }
@@ -395,7 +397,13 @@ impl GitProject {
                     // every local branch before the Pull operation could complete.
                     // Pull may rewrite the checked-out files and index without
                     // relying on the filesystem watcher to deliver every event.
-                    refresh_caches.mark_worktree_status_dirty(&task_worktree_path);
+                    if !preserve_status_cache {
+                        refresh_caches.mark_worktree_status_dirty(&task_worktree_path);
+                    } else {
+                        log::info!(
+                            "pull status cache preserved: already up to date and autostash disabled"
+                        );
+                    }
                     let refresh_started = std::time::Instant::now();
                     let refresh_result = gather_refresh_data_lightweight_cached(
                         &repo_path,
@@ -412,14 +420,14 @@ impl GitProject {
                         "pull timing: background operation completed in {:?}",
                         operation_started.elapsed()
                     );
-                    Ok((msg, is_conflict, details, data))
+                    Ok((msg, is_conflict, details, preserve_status_cache, data))
                 })
                 .await;
 
             cx.update(|cx| {
                 this.update(cx, |this, cx| {
                     match result {
-                        Ok((msg, is_conflict, details, data)) => {
+                        Ok((msg, is_conflict, details, _preserve_status_cache, data)) => {
                             this.apply_refresh_data(data);
                             if this.needs_graph_state_refresh() {
                                 // Keep the Pull completion path responsive; the

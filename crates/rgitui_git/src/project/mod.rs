@@ -400,6 +400,9 @@ pub struct GitProject {
     /// Identifies the currently valid commit query (refs/filter/pagination session).
     /// Async commit results captured under an older generation must not be applied.
     commit_query_generation: u64,
+    /// Advances only when a new commit-history snapshot replaces the visible list.
+    /// Status-only refreshes keep this stable, so they do not cancel history paging.
+    commit_history_generation: u64,
     /// Suppresses duplicate pagination requests while one page is already in flight.
     load_more_in_flight: bool,
     /// The linked worktree the UI is currently inspecting, if any. The watcher
@@ -459,6 +462,7 @@ impl GitProject {
             refresh_caches: Arc::default(),
             refresh_generation: 0,
             commit_query_generation: 0,
+            commit_history_generation: 0,
             load_more_in_flight: false,
             inspected_worktree: None,
             background_work: Arc::new(AtomicUsize::new(0)),
@@ -498,6 +502,7 @@ impl GitProject {
             refresh_caches: Arc::default(),
             refresh_generation: 0,
             commit_query_generation: 0,
+            commit_history_generation: 0,
             load_more_in_flight: false,
             inspected_worktree: None,
             background_work: Arc::new(AtomicUsize::new(0)),
@@ -901,6 +906,10 @@ impl GitProject {
     }
 
     pub(crate) fn apply_refresh_data(&mut self, data: RefreshData) {
+        if !Arc::ptr_eq(&self.recent_commits, &data.recent_commits) {
+            self.commit_history_generation = self.commit_history_generation.wrapping_add(1);
+            self.load_more_in_flight = false;
+        }
         if !data.status_cache_updated {
             self.refresh_caches.invalidate_all_status_cache();
         }

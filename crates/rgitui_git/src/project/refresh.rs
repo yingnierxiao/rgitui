@@ -1619,10 +1619,10 @@ impl GitProject {
             let tag_tips: Vec<(git2::Oid, String)> =
                 data.tags.iter().map(|t| (t.oid, t.name.clone())).collect();
 
-            cx.update(|cx| {
+            let phase_one_history_generation = cx.update(|cx| {
                 this.update(cx, |this, cx| {
                     if this.commit_query_generation != query_generation {
-                        return Ok::<(), anyhow::Error>(());
+                        return Ok::<Option<u64>, anyhow::Error>(None);
                     }
                     let reached_ui = t.elapsed();
                     this.apply_refresh_data(data);
@@ -1636,9 +1636,12 @@ impl GitProject {
                     // Fire ahead/behind computation in the background (deferred from lightweight refresh)
                     this.refresh_ahead_behind(cx);
                     cx.notify();
-                    Ok::<(), anyhow::Error>(())
+                    Ok::<Option<u64>, anyhow::Error>(Some(this.commit_history_generation))
                 })
             })??;
+            let Some(phase_one_history_generation) = phase_one_history_generation else {
+                return Ok(());
+            };
 
             // Phase 2: load remaining commits
             if needs_more {
@@ -1648,6 +1651,16 @@ impl GitProject {
                 // Page from the stable cursor (the oldest commit loaded in phase 1)
                 // rather than a numeric skip, so a ref change between the two
                 // subprocesses can't shift the boundary and skip a commit.
+                let phase_two_is_current = cx.update(|cx| {
+                    this.update(cx, |this, _| {
+                        this.commit_query_generation == query_generation
+                            && this.commit_history_generation == phase_one_history_generation
+                    })
+                })?;
+                if !phase_two_is_current {
+                    log::info!("refresh phase 2 skipped: a newer history snapshot was applied");
+                    return Ok(());
+                }
                 let (already_loaded, cursor) = cx.update(|cx| {
                     this.update(cx, |this, _| {
                         (
@@ -1673,7 +1686,12 @@ impl GitProject {
 
                 let completed = cx.update(|cx| {
                     this.update(cx, |this, cx| {
-                        if this.commit_query_generation != query_generation {
+                        if this.commit_query_generation != query_generation
+                            || this.commit_history_generation != phase_one_history_generation
+                        {
+                            log::info!(
+                                "refresh phase 2 discarded: a newer history snapshot was applied"
+                            );
                             return Ok::<_, anyhow::Error>(None);
                         }
                         let existing_oids: std::collections::HashSet<git2::Oid> =
