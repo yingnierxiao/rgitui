@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -301,6 +301,77 @@ fn visual_header_state(
     }
 }
 
+/// Select a range in the displayed order (not path order), so the keyboard
+/// and mouse behave consistently even with sorting and filters enabled.
+fn selection_after_click(
+    rows: &[ChangeRow],
+    visible: &[usize],
+    current: &HashSet<PathBuf>,
+    anchor: Option<&Path>,
+    clicked: usize,
+    extend: bool,
+    additive: bool,
+) -> (HashSet<PathBuf>, PathBuf) {
+    let clicked_path = rows[visible[clicked]].path.clone();
+    let mut selection = if additive {
+        current.clone()
+    } else {
+        HashSet::new()
+    };
+    if extend {
+        let first = anchor
+            .and_then(|path| {
+                visible
+                    .iter()
+                    .position(|index| rows[*index].path.as_path() == path)
+            })
+            .unwrap_or(clicked);
+        for position in first.min(clicked)..=first.max(clicked) {
+            selection.insert(rows[visible[position]].path.clone());
+        }
+    } else if additive {
+        if !selection.insert(clicked_path.clone()) {
+            selection.remove(&clicked_path);
+        }
+    } else {
+        selection.insert(clicked_path.clone());
+    }
+    (selection, clicked_path)
+}
+
+/// Build one Git operation for the selected visible paths. Already staged,
+/// conflicted and in-flight paths are excluded to prevent redundant writes.
+fn selected_staging_action(
+    rows: &[ChangeRow],
+    visible: &[usize],
+    selected: &HashSet<PathBuf>,
+    pending: &HashMap<PathBuf, CheckState>,
+    target: CheckState,
+) -> Option<SidebarEvent> {
+    let paths: Vec<String> = visible
+        .iter()
+        .filter_map(|index| rows.get(*index))
+        .filter(|row| {
+            selected.contains(&row.path)
+                && !row.has_conflict()
+                && !pending.contains_key(&row.path)
+                && match target {
+                    CheckState::Checked => row.unstaged.is_some(),
+                    CheckState::Unchecked => row.staged.is_some(),
+                    CheckState::Indeterminate => false,
+                }
+        })
+        .map(|row| row.path.to_string_lossy().into_owned())
+        .collect();
+    if paths.is_empty() {
+        None
+    } else if target == CheckState::Checked {
+        Some(SidebarEvent::StageFiles(paths))
+    } else {
+        Some(SidebarEvent::UnstageFiles(paths))
+    }
+}
+
 /// GitHub Desktop-style working-tree list. The repository navigation Sidebar
 /// retains sole ownership of Git actions; this panel forwards SidebarEvent
 /// instead of implementing a second set of Stage/Unstage handlers.
@@ -309,6 +380,8 @@ pub struct ChangesPanel {
     rows: Arc<Vec<ChangeRow>>,
     pending: Arc<HashMap<PathBuf, CheckState>>,
     visible: Arc<Vec<usize>>,
+    selected_paths: Arc<HashSet<PathBuf>>,
+    selection_anchor: Option<PathBuf>,
     /// Cached counts avoid scanning huge working trees on every 60 FPS render.
     staged_count: usize,
     header_state: CheckState,
@@ -349,6 +422,8 @@ impl ChangesPanel {
             rows: Arc::new(Vec::new()),
             pending: Arc::new(HashMap::new()),
             visible: Arc::new(Vec::new()),
+            selected_paths: Arc::new(HashSet::new()),
+            selection_anchor: None,
             staged_count: 0,
             header_state: CheckState::Unchecked,
             header_action: None,
@@ -369,6 +444,8 @@ impl ChangesPanel {
         if self.worktree_path.as_ref() != Some(&path) {
             self.worktree_path = Some(path);
             self.pending = Arc::new(HashMap::new());
+            self.selected_paths = Arc::new(HashSet::new());
+            self.selection_anchor = None;
             self.selected_path = None;
             self.selected_row = None;
             self.scroll = UniformListScrollHandle::new();
@@ -485,6 +562,14 @@ impl ChangesPanel {
             visual_header_state(&self.rows, &visible, &self.pending)
         };
         self.header_action = action;
+        if !self.selected_paths.is_empty() {
+            let visible_paths: HashSet<&Path> = visible
+                .iter()
+                .map(|index| self.rows[*index].path.as_path())
+                .collect();
+            Arc::make_mut(&mut self.selected_paths)
+                .retain(|path| visible_paths.contains(path.as_path()));
+        }
         self.visible = Arc::new(visible);
         self.selected_row = self
             .selected_path
@@ -575,6 +660,89 @@ impl ChangesPanel {
         }
     }
 
+    /// Regular click selects one row, Ctrl/Cmd toggles individual rows and
+    /// Shift extends the range from the last unmodified click.
+    fn select_visible_row(
+        &mut self,
+        row_number: usize,
+        extend: bool,
+        additive: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if row_number >= self.visible.len() {
+            return;
+        }
+        let (selected, clicked_path) = selection_after_click(
+            &self.rows,
+            &self.visible,
+            &self.selected_paths,
+            self.selection_anchor.as_deref(),
+            row_number,
+            extend,
+            additive,
+        );
+        if !extend || self.selection_anchor.is_none() {
+            self.selection_anchor = Some(clicked_path.clone());
+        }
+        self.selected_paths = Arc::new(selected);
+        self.selected_path = Some(clicked_path);
+        self.selected_row = Some(row_number);
+        cx.notify();
+    }
+
+    /// Clicking a checkbox within a multi-selection applies one operation to
+    /// the group. Shift-clicking a checkbox also stages/unstages the range.
+    fn toggle_checkbox(
+        &mut self,
+        row_number: usize,
+        extend: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.visible.get(row_number).copied() else {
+            return;
+        };
+        let path = self.rows[index].path.clone();
+        if extend || !self.selected_paths.contains(&path) {
+            self.select_visible_row(row_number, extend, false, cx);
+        }
+        let Some(row) = self.rows.get(index) else {
+            return;
+        };
+        if row.has_conflict() || self.pending.contains_key(&path) {
+            return;
+        }
+        let target = if visual_state(row, &self.pending) == CheckState::Checked {
+            CheckState::Unchecked
+        } else {
+            CheckState::Checked
+        };
+        if let Some(action) = selected_staging_action(
+            &self.rows,
+            &self.visible,
+            &self.selected_paths,
+            &self.pending,
+            target,
+        ) {
+            self.dispatch_stage_action(action, cx);
+        }
+    }
+
+    fn select_all_visible(&mut self, cx: &mut Context<Self>) {
+        self.selected_paths = Arc::new(
+            self.visible
+                .iter()
+                .map(|index| self.rows[*index].path.clone())
+                .collect(),
+        );
+        cx.notify();
+    }
+
+    fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        self.selected_paths = Arc::new(HashSet::new());
+        self.selection_anchor = None;
+        cx.notify();
+    }
+
     fn activate_selected(&self, cx: &mut App) {
         if let Some(row) = self.selected_row.and_then(|index| self.visible.get(index)) {
             self.send(self.rows[*row].selected_event(), cx);
@@ -582,15 +750,12 @@ impl ChangesPanel {
     }
 
     fn toggle_selected(&mut self, cx: &mut Context<Self>) {
-        if let Some(row) = self.selected_row.and_then(|index| self.visible.get(index)) {
-            let row = &self.rows[*row];
-            if !row.has_conflict() && !self.pending.contains_key(&row.path) {
-                self.dispatch_stage_action(row.toggle_event(), cx);
-            }
+        if let Some(row_number) = self.selected_row {
+            self.toggle_checkbox(row_number, false, cx);
         }
     }
 
-    fn select_offset(&mut self, direction: isize, cx: &mut Context<Self>) {
+    fn select_offset(&mut self, direction: isize, extend: bool, cx: &mut Context<Self>) {
         if self.visible.is_empty() {
             return;
         }
@@ -601,10 +766,8 @@ impl ChangesPanel {
             (Some(index), d) if d > 0 => (index + 1).min(last),
             (Some(index), _) => index.saturating_sub(1),
         };
-        self.selected_row = Some(next);
-        self.selected_path = Some(self.rows[self.visible[next]].path.clone());
+        self.select_visible_row(next, extend, false, cx);
         self.scroll.scroll_to_item(next, ScrollStrategy::Nearest);
-        cx.notify();
     }
 }
 
@@ -615,7 +778,7 @@ impl Render for ChangesPanel {
         let rows = self.rows.clone();
         let pending = self.pending.clone();
         let visible = self.visible.clone();
-        let selected_path = self.selected_path.clone();
+        let selected_paths = self.selected_paths.clone();
         let sidebar = self.sidebar.clone();
         let panel = cx.weak_entity();
         let show_line_stats = cx.global::<SettingsState>().settings().show_change_line_stats;
@@ -665,11 +828,10 @@ impl Render for ChangesPanel {
                             .unwrap_or_default()
                             .into();
                         let kind = row.kind();
-                        let is_selected = selected_path.as_ref() == Some(&row.path);
+                        let is_selected = selected_paths.contains(&row.path);
                         let check_state = visual_state(row, &pending);
                         let disabled = row.has_conflict() || pending.contains_key(&row.path);
                         let select_action = row.selected_event();
-                        let toggle_action = row.toggle_event();
                         let staged_preview = row.staged_preview_event();
                         let stats = row.display_status().cloned();
                         let sidebar_select = sidebar.clone();
@@ -698,18 +860,24 @@ impl Render for ChangesPanel {
                             .hover(move |el| el.bg(row_hover))
                             .cursor_pointer()
                             .tooltip(Tooltip::text(path_tooltip))
-                            .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                            .on_click(move |event: &ClickEvent, window: &mut Window, cx: &mut App| {
+                                let modifiers = event.modifiers();
                                 weak_panel
                                     .update(cx, |this, cx| {
-                                        this.selected_path = Some(path_selected.clone());
-                                        this.selected_row = Some(row_number);
+                                        this.select_visible_row(
+                                            row_number,
+                                            modifiers.shift,
+                                            modifiers.secondary(),
+                                            cx,
+                                        );
                                         this.focus_handle.focus(window, cx);
-                                        cx.notify();
                                     })
                                     .ok();
-                                sidebar_select
-                                    .update(cx, |_, cx| cx.emit(select_action.clone()))
-                                    .ok();
+                                if !modifiers.shift && !modifiers.secondary() {
+                                    sidebar_select
+                                        .update(cx, |_, cx| cx.emit(select_action.clone()))
+                                        .ok();
+                                }
                             })
                             .child(
                                 Checkbox::new(
@@ -720,11 +888,12 @@ impl Render for ChangesPanel {
                                     check_state,
                                 )
                                 .disabled(disabled)
-                                .on_click(move |_, _, cx| {
+                                .on_click(move |event, _, cx| {
+                                    let extend = event.modifiers().shift;
                                     cx.stop_propagation();
                                     weak_panel_toggle
                                         .update(cx, |this, cx| {
-                                            this.dispatch_stage_action(toggle_action.clone(), cx);
+                                            this.toggle_checkbox(row_number, extend, cx);
                                         })
                                         .ok();
                                 }),
@@ -801,17 +970,25 @@ impl Render for ChangesPanel {
                     cx.propagate();
                     return;
                 }
-                if event.keystroke.modifiers.secondary()
-                    || event.keystroke.modifiers.alt
-                {
+                let modifiers = event.keystroke.modifiers;
+                if modifiers.secondary() {
+                    if event.keystroke.key == "a" {
+                        this.select_all_visible(cx);
+                    } else {
+                        cx.propagate();
+                    }
+                    return;
+                }
+                if modifiers.alt {
                     cx.propagate();
                     return;
                 }
                 match event.keystroke.key.as_str() {
-                    "up" | "k" => this.select_offset(-1, cx),
-                    "down" | "j" => this.select_offset(1, cx),
+                    "up" | "k" => this.select_offset(-1, modifiers.shift, cx),
+                    "down" | "j" => this.select_offset(1, modifiers.shift, cx),
                     "enter" => this.activate_selected(cx),
                     "space" | "s" => this.toggle_selected(cx),
+                    "escape" => this.clear_selection(cx),
                     _ => cx.propagate(),
                 }
             }))
@@ -961,6 +1138,83 @@ mod tests {
             additions: 0,
             deletions: 0,
         }
+    }
+
+    #[test]
+    fn ctrl_click_selects_non_adjacent_paths_and_toggles_them() {
+        let rows = combine_changes(
+            vec![],
+            vec![
+                file("a.rs", FileChangeKind::Modified),
+                file("b.rs", FileChangeKind::Modified),
+                file("c.rs", FileChangeKind::Modified),
+            ],
+        );
+        let visible = vec![0, 1, 2];
+        let (selection, _) =
+            selection_after_click(&rows, &visible, &HashSet::new(), None, 0, false, false);
+        let (selection, _) = selection_after_click(
+            &rows, &visible, &selection, Some(Path::new("a.rs")), 2, false, true,
+        );
+        assert_eq!(selection.len(), 2);
+        assert!(selection.contains(Path::new("a.rs")));
+        assert!(selection.contains(Path::new("c.rs")));
+        let (selection, _) = selection_after_click(
+            &rows, &visible, &selection, Some(Path::new("c.rs")), 0, false, true,
+        );
+        assert_eq!(selection.len(), 1);
+        assert!(selection.contains(Path::new("c.rs")));
+    }
+
+    #[test]
+    fn shift_range_follows_visible_order_and_excludes_hidden_files() {
+        let rows = combine_changes(
+            vec![],
+            vec![
+                file("a.rs", FileChangeKind::Modified),
+                file("hidden.rs", FileChangeKind::Modified),
+                file("z.rs", FileChangeKind::Modified),
+            ],
+        );
+        let visible = vec![2, 0];
+        let (selection, _) = selection_after_click(
+            &rows, &visible, &HashSet::new(), Some(Path::new("z.rs")), 1, true, false,
+        );
+        assert_eq!(selection.len(), 2);
+        assert!(!selection.contains(Path::new("hidden.rs")));
+        assert!(selection.contains(Path::new("a.rs")));
+        assert!(selection.contains(Path::new("z.rs")));
+    }
+
+    #[test]
+    fn selected_checkbox_batches_stage_and_unstage_once() {
+        let rows = combine_changes(
+            vec![file("staged.rs", FileChangeKind::Modified)],
+            vec![
+                file("a.rs", FileChangeKind::Modified),
+                file("b.rs", FileChangeKind::Modified),
+                file("partial.rs", FileChangeKind::Modified),
+                file("staged.rs", FileChangeKind::Modified),
+                file("conflict.rs", FileChangeKind::Conflicted),
+            ],
+        );
+        let visible: Vec<usize> = (0..rows.len()).collect();
+        let selected: HashSet<PathBuf> = rows.iter().map(|r| r.path.clone()).collect();
+        let pending = HashMap::from([(PathBuf::from("b.rs"), CheckState::Checked)]);
+        assert_eq!(
+            selected_staging_action(
+                &rows, &visible, &selected, &pending, CheckState::Checked,
+            ),
+            Some(SidebarEvent::StageFiles(vec![
+                "a.rs".into(), "partial.rs".into(), "staged.rs".into(),
+            ]))
+        );
+        assert_eq!(
+            selected_staging_action(
+                &rows, &visible, &selected, &pending, CheckState::Unchecked,
+            ),
+            Some(SidebarEvent::UnstageFiles(vec!["staged.rs".into()]))
+        );
     }
 
     #[test]
