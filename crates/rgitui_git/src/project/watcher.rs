@@ -278,7 +278,7 @@ fn git_metadata_affects_status_without_fingerprint(path: &Path) -> bool {
         Some("exclude") | Some("attributes") | Some("sparse-checkout") => path
             .parent()
             .and_then(|parent| parent.file_name())
-            .is_some_and(|name| name == "info"),
+            .is_some_and(|name| name == std::ffi::OsStr::new("info")),
         _ => false,
     }
 }
