@@ -40,6 +40,7 @@
     "changes.kind.other": "其他",
     "changes.no_matches": "没有匹配的文件",
     "changes.only_staged": "已暂存",
+    "changes.preview_staged": "暂存",
     "changes.sort.path": "按路径",
     "changes.sort.status": "按状态",
     "changes.tab": "变更",

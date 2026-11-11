@@ -62,6 +62,20 @@ impl ChangeRow {
         }
     }
 
+    /// Partial staging preserves two independently viewable diffs: the row
+    /// opens the working-tree delta, and a small index control opens the
+    /// staged delta without changing the checkbox.
+    fn staged_preview_event(&self) -> Option<SidebarEvent> {
+        if self.staged.is_some() && self.unstaged.is_some() {
+            Some(SidebarEvent::FileSelected {
+                path: self.path.to_string_lossy().to_string(),
+                staged: true,
+            })
+        } else {
+            None
+        }
+    }
+
     fn toggle_event(&self) -> SidebarEvent {
         let path = self.path.to_string_lossy().to_string();
         if self.unstaged.is_some() {
@@ -471,9 +485,11 @@ impl Render for ChangesPanel {
                         let disabled = row.has_conflict();
                         let select_action = row.selected_event();
                         let toggle_action = row.toggle_event();
+                        let staged_preview = row.staged_preview_event();
                         let stats = row.display_status().cloned();
                         let sidebar_select = sidebar.clone();
                         let sidebar_toggle = sidebar.clone();
+                        let sidebar_preview = sidebar.clone();
                         let weak_panel = panel.clone();
                         let path_selected = row.path.clone();
                         let path_tooltip = file_path.clone();
@@ -551,6 +567,24 @@ impl Render for ChangesPanel {
                                     .size(LabelSize::XSmall)
                                     .color(change_color(kind)),
                             )
+                            .when_some(staged_preview, |el, preview| {
+                                el.child(
+                                    Button::new(
+                                        ElementId::NamedInteger(
+                                            "changes-preview-staged".into(),
+                                            row_number as u64,
+                                        ),
+                                        t!("changes.preview_staged"),
+                                    )
+                                    .size(ButtonSize::Compact)
+                                    .on_click(move |_, _, cx| {
+                                        cx.stop_propagation();
+                                        sidebar_preview
+                                            .update(cx, |_, cx| cx.emit(preview.clone()))
+                                            .ok();
+                                    }),
+                                )
+                            })
                             .when(show_line_stats && !disabled, |el| {
                                 if let Some(ref stat) = stats {
                                     el.child(DiffStat::new(stat.additions, stat.deletions))
@@ -754,6 +788,28 @@ mod tests {
         assert_eq!(
             rows[1].toggle_event(),
             SidebarEvent::StageFile("z.rs".into())
+        );
+    }
+
+    #[test]
+    fn partially_staged_files_allow_staged_and_unstaged_previews() {
+        let rows = combine_changes(
+            vec![file("src/x.rs", FileChangeKind::Modified)],
+            vec![file("src/x.rs", FileChangeKind::Modified)],
+        );
+        assert_eq!(
+            rows[0].selected_event(),
+            SidebarEvent::FileSelected {
+                path: "src/x.rs".into(),
+                staged: false,
+            }
+        );
+        assert_eq!(
+            rows[0].staged_preview_event(),
+            Some(SidebarEvent::FileSelected {
+                path: "src/x.rs".into(),
+                staged: true,
+            })
         );
     }
 
