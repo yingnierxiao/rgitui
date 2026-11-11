@@ -680,9 +680,20 @@ impl ChangesPanel {
     /// virtual choices so they can correct the error without selecting again.
     pub fn commit_succeeded(
         &mut self,
+        worktree: &Path,
         paths: &[PathBuf],
         cx: &mut Context<Self>,
     ) {
+        // A background commit may finish after the user inspects another
+        // worktree. Never clear that new worktree's choices by accident.
+        if self.worktree_path.as_deref() != Some(worktree) {
+            if let Some(saved) = self.worktree_overrides.get_mut(worktree) {
+                for path in paths {
+                    saved.remove(path);
+                }
+            }
+            return;
+        }
         let overrides = Arc::make_mut(&mut self.overrides);
         let mut changed = false;
         for path in paths {
