@@ -48,6 +48,18 @@ fn push_with_auto_pull(
                 remote_branch
             );
             let repo = open_worktree_repo(worktree)?;
+            // A remote may use a different push URL from its fetch URL.
+            // Pulling from that other repository would merge the wrong history.
+            let configured_remote = repo.find_remote(remote)?;
+            if configured_remote
+                .pushurl()
+                .is_some_and(|url| Some(url) != configured_remote.url())
+            {
+                anyhow::bail!(
+                    "Remote {remote} has a different push URL and fetch URL. Automatic pull \
+                     was skipped to avoid merging an unrelated branch."
+                );
+            }
             if repo.state() != RepositoryState::Clean {
                 anyhow::bail!(
                     "Remote {remote}/{remote_branch} has new commits. Automatic pull was skipped \
@@ -73,17 +85,21 @@ fn push_with_auto_pull(
                 worktree,
                 &["pull", "--no-rebase", "--no-edit", remote, remote_branch],
             )
-            .with_context(|| {
-                format!(
-                    "Automatic pull of {remote}/{remote_branch} could not finish. \
-                     Resolve any merge conflicts, then push again"
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "Automatic pull of {remote}/{remote_branch} failed: {error}. \
+                     Resolve any conflicts or other pull errors, then push again."
                 )
             })?;
 
             // Retry exactly once. A second rejection may mean a concurrent
             // remote update; never loop indefinitely or silently force.
-            let details = run_git_network_command(worktree, args)
-                .context("Push was rejected again after automatic pull; fetch and review the remote changes")?;
+            let details = run_git_network_command(worktree, args).map_err(|error| {
+                anyhow::anyhow!(
+                    "Push retry after automatic pull failed: {error}. \
+                     The remote may have changed again; fetch and review it before retrying."
+                )
+            })?;
             let auto_pull_detail =
                 format!("Automatically pulled {remote}/{remote_branch} before pushing.");
             Ok(Some(match details {
