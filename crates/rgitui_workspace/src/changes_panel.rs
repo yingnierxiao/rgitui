@@ -616,6 +616,18 @@ impl ChangesPanel {
         self.staged_count
     }
 
+    /// Files at the front of the currently displayed list get line counts
+    /// before background statistics for the rest of the repository. Only
+    /// paths are copied; no Git operation occurs from the rendering thread.
+    pub fn priority_stats_paths(&self, max_files: usize) -> Vec<PathBuf> {
+        self.visible
+            .iter()
+            .filter_map(|index| self.rows.get(*index))
+            .take(max_files)
+            .map(|row| row.path.clone())
+            .collect()
+    }
+
     pub fn set_commit_in_progress(&mut self, active: bool, cx: &mut Context<Self>) {
         if self.commit_in_progress != active {
             self.commit_in_progress = active;
