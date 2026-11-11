@@ -153,13 +153,19 @@ impl ChangeKindFilter {
         match self {
             Self::All => true,
             Self::Modified => kind == FileChangeKind::Modified,
-            Self::Added => matches!(kind, FileChangeKind::Added | FileChangeKind::Untracked),
+            Self::Added => matches!(
+                kind,
+                FileChangeKind::Added
+                    | FileChangeKind::Untracked
+                    | FileChangeKind::UntrackedDirectory
+            ),
             Self::Deleted => kind == FileChangeKind::Deleted,
             Self::Other => !matches!(
                 kind,
                 FileChangeKind::Modified
                     | FileChangeKind::Added
                     | FileChangeKind::Untracked
+                    | FileChangeKind::UntrackedDirectory
                     | FileChangeKind::Deleted
             ),
         }
@@ -185,6 +191,9 @@ pub struct ChangesPanel {
     sidebar: WeakEntity<Sidebar>,
     rows: Arc<Vec<ChangeRow>>,
     visible: Arc<Vec<usize>>,
+    /// Cached counts avoid scanning huge working trees on every 60 FPS render.
+    staged_count: usize,
+    fully_staged: bool,
     filter: String,
     kind_filter: ChangeKindFilter,
     only_staged: bool,
@@ -220,6 +229,8 @@ impl ChangesPanel {
             sidebar,
             rows: Arc::new(Vec::new()),
             visible: Arc::new(Vec::new()),
+            staged_count: 0,
+            fully_staged: false,
             filter: String::new(),
             kind_filter: ChangeKindFilter::All,
             only_staged: false,
@@ -261,6 +272,7 @@ impl ChangesPanel {
             self.selected_path = None;
             self.selected_row = None;
         }
+        self.update_counts(&updated);
         self.rows = Arc::new(updated);
         self.rebuild_filter();
         cx.notify();
@@ -294,6 +306,7 @@ impl ChangesPanel {
             unstaged: Some(file),
         }));
         rows.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+        self.update_counts(&rows);
         self.rows = Arc::new(rows);
         if self.selected_path.as_deref() == Some(path) {
             self.selected_path = None;
@@ -301,6 +314,14 @@ impl ChangesPanel {
         }
         self.rebuild_filter();
         cx.notify();
+    }
+
+    fn update_counts(&mut self, rows: &[ChangeRow]) {
+        self.staged_count = rows.iter().filter(|row| row.staged.is_some()).count();
+        self.fully_staged = !rows.is_empty()
+            && rows
+                .iter()
+                .all(|row| row.state() == CheckState::Checked);
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -393,9 +414,8 @@ impl Render for ChangesPanel {
         let sidebar = self.sidebar.clone();
         let panel = cx.weak_entity();
         let show_line_stats = cx.global::<SettingsState>().settings().show_change_line_stats;
-        let staged_count = rows.iter().filter(|row| row.staged.is_some()).count();
-        let all_checked =
-            !rows.is_empty() && rows.iter().all(|row| row.state() == CheckState::Checked);
+        let staged_count = self.staged_count;
+        let all_checked = self.fully_staged;
         let selected_some = staged_count > 0;
         let header_state = if all_checked {
             CheckState::Checked
@@ -514,15 +534,15 @@ impl Render for ChangesPanel {
                                     .gap(px(4.))
                                     .overflow_hidden()
                                     .child(
-                                        Label::new(parent)
-                                            .size(LabelSize::XSmall)
-                                            .color(Color::Muted)
-                                            .truncate(),
-                                    )
-                                    .child(
                                         Label::new(filename)
                                             .size(LabelSize::XSmall)
                                             .color(Color::Default)
+                                            .truncate(),
+                                    )
+                                    .child(
+                                        Label::new(parent)
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted)
                                             .truncate(),
                                     ),
                             )
@@ -775,6 +795,27 @@ mod tests {
             true
         ));
         assert_eq!(ChangeKindFilter::Other.next(), ChangeKindFilter::All);
+    }
+
+    #[test]
+    fn untracked_directory_is_included_in_added_filter() {
+        let placeholder = ChangeRow {
+            path: PathBuf::from("generated"),
+            staged: None,
+            unstaged: Some(file("generated", FileChangeKind::UntrackedDirectory)),
+        };
+        assert!(change_matches_filter(
+            &placeholder,
+            "",
+            ChangeKindFilter::Added,
+            false
+        ));
+        assert!(!change_matches_filter(
+            &placeholder,
+            "",
+            ChangeKindFilter::Other,
+            false
+        ));
     }
 
     #[test]
