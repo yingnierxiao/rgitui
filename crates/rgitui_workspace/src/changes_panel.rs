@@ -737,7 +737,11 @@ impl ChangesPanel {
         } else {
             CheckState::Checked
         };
-        let paths = selected_virtual_paths(&self.rows, &self.visible, &self.selected_paths);
+        let paths = if self.selected_paths.len() == 1 {
+            vec![path]
+        } else {
+            selected_virtual_paths(&self.rows, &self.visible, &self.selected_paths)
+        };
         self.set_virtual_paths(&paths, target, cx);
     }
 
