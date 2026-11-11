@@ -778,9 +778,24 @@ impl GitProject {
         worktree_path: &Path,
         cx: &mut Context<Self>,
     ) -> Task<Result<git2::Oid>> {
-        log::info!("commit: amend={}", amend);
+        self.commit_with_selection_at(message, amend, worktree_path, None, cx)
+    }
+
+    /// Commit the virtual selection. The user's real index is not touched
+    /// while selecting files and is only reconciled for included paths once
+    /// the new HEAD has been created successfully.
+    pub fn commit_with_selection_at(
+        &mut self,
+        message: &str,
+        amend: bool,
+        worktree_path: &Path,
+        selection: Option<(Vec<CommitSelectedFile>, Vec<PathBuf>)>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<git2::Oid>> {
+        log::info!("commit: amend={} virtual_selection={}", amend, selection.is_some());
         let message = message.to_string();
         let task_message = message.clone();
+        let task_selection = selection;
         let commit_summary = message.lines().next().unwrap_or("").to_string();
         let worktree_path = worktree_path.to_path_buf();
         let refresh_repo_path = self.repo_path.clone();
@@ -803,11 +818,21 @@ impl GitProject {
                 .spawn(async move {
                     let repo = Repository::open(&worktree_path)?;
                     let sig = repo.signature()?;
-                    let mut index = repo.index()?;
-                    if index.is_empty() {
-                        return Err(error(msg!("git.error.no_staged_changes")));
-                    }
-                    let tree_oid = index.write_tree()?;
+                    let tree_oid = if let Some((selected, excluded)) = &task_selection {
+                        tree_for_virtual_selection(
+                            &repo,
+                            &worktree_path,
+                            selected,
+                            excluded,
+                            amend,
+                        )?
+                    } else {
+                        let mut index = repo.index()?;
+                        if index.is_empty() {
+                            return Err(error(msg!("git.error.no_staged_changes")));
+                        }
+                        index.write_tree()?
+                    };
                     let tree = repo.find_tree(tree_oid)?;
 
                     let auth = current_git_auth_runtime();
@@ -940,6 +965,28 @@ impl GitProject {
                             )?
                         }
                     };
+
+                    // Advance selected paths in the REAL index to the new HEAD.
+                    // Unselected staged entries remain untouched, so a user's
+                    // CLI/IDE staging is not discarded by this virtual commit.
+                    if let Some((selected, _)) = &task_selection {
+                        let paths = selected
+                            .iter()
+                            .map(|file| file.path.clone())
+                            .collect::<Vec<_>>();
+                        let committed = repo.find_commit(oid)?;
+                        if let Err(error) =
+                            repo.reset_default(Some(committed.as_object()), &paths)
+                        {
+                            // The commit already succeeded; never report an
+                            // ordinary failure that encourages a duplicate commit.
+                            log::error!(
+                                "Commit {} succeeded but could not reconcile selected index paths: {}",
+                                oid,
+                                error
+                            );
+                        }
+                    }
 
                     // Clear MERGE_HEAD/MERGE_MSG so the repository leaves the
                     // 'Merging' state once the merge commit has been created.
