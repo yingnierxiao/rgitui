@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::types::*;
 
-use super::diff::batch_diff_stats;
+use super::diff::{batch_diff_stats, batch_diff_stats_for_paths};
 use super::git_command;
 use super::GitProject;
 use super::GitProjectEvent;
@@ -130,6 +130,8 @@ pub(super) struct RefreshCaches {
     /// Prevents the watcher from racing expensive refreshes started by Git operations.
     active_operations: AtomicUsize,
     commit_log: Mutex<Option<CommitLogEntry>>,
+    /// The latest project generation for which deferred line stats were queued.
+    line_stats_queued_generation: AtomicU64,
 }
 
 /// One bounded in-memory history snapshot keyed by refs/HEAD, limit and
@@ -1210,7 +1212,11 @@ fn gather_refresh_data_internal(
     // Run status, stashes, worktrees in parallel; scoped threads for the same
     // reason as in `compute_working_tree_status`. Status and stashes open their
     // own repos, while worktrees and the revwalk share `&repo`.
-    let line_stats_enabled = rgitui_settings::change_line_stats_enabled();
+    // An interactive cached refresh publishes file names/states immediately.
+    // Expensive diff line counts are computed separately in priority order and
+    // reported through LineStatsUpdated; standalone callers keep old behavior.
+    let line_stats_enabled =
+        rgitui_settings::change_line_stats_enabled() && refresh_caches.is_none();
     let current_line_stats = should_compute_line_stats(
         line_stats_enabled,
         true,
@@ -1578,7 +1584,208 @@ use gpui::{AsyncApp, Context, Task, WeakEntity};
 
 const FIRST_BATCH_SIZE: usize = 100;
 
+/// One checkout's immutable paths, captured when the initial status was applied.
+#[derive(Clone)]
+struct DeferredLineStatTarget {
+    worktree: PathBuf,
+    staged_paths: Vec<PathBuf>,
+    unstaged_paths: Vec<PathBuf>,
+}
+
+type LineStatMap = HashMap<PathBuf, (usize, usize)>;
+type LineStatResult = (PathBuf, LineStatMap, LineStatMap);
+
+fn compute_deferred_stats(
+    targets: &[DeferredLineStatTarget],
+    priority_worktree: &Path,
+    priority_paths: &[PathBuf],
+    only_priority: bool,
+) -> Vec<LineStatResult> {
+    let mut result = Vec::with_capacity(targets.len());
+    for target in targets {
+        let selected = |paths: &[PathBuf]| -> Vec<PathBuf> {
+            if only_priority {
+                if target.worktree != priority_worktree {
+                    return Vec::new();
+                }
+                paths.iter().filter(|path| priority_paths.contains(path)).cloned().collect()
+            } else {
+                paths.to_vec()
+            }
+        };
+        let staged = selected(&target.staged_paths);
+        let unstaged = selected(&target.unstaged_paths);
+        if staged.is_empty() && unstaged.is_empty() {
+            continue;
+        }
+        let started = std::time::Instant::now();
+        let Ok(repo) = Repository::open(&target.worktree) else {
+            log::warn!("deferred line stats: cannot open {}", target.worktree.display());
+            continue;
+        };
+        let staged_stats = if staged.is_empty() {
+            HashMap::new()
+        } else if only_priority {
+            batch_diff_stats_for_paths(&repo, true, &staged)
+        } else {
+            batch_diff_stats(&repo, true)
+        };
+        let unstaged_stats = if unstaged.is_empty() {
+            HashMap::new()
+        } else if only_priority {
+            batch_diff_stats_for_paths(&repo, false, &unstaged)
+        } else {
+            batch_diff_stats(&repo, false)
+        };
+        log::info!(
+            "deferred line stats timing: path={} phase={} files={} duration={:?}",
+            target.worktree.display(),
+            if only_priority { "visible" } else { "remaining" },
+            staged.len() + unstaged.len(),
+            started.elapsed(),
+        );
+        result.push((target.worktree.clone(), staged_stats, unstaged_stats));
+    }
+    result
+}
+
+fn merge_line_stats(
+    status: &mut WorkingTreeStatus,
+    staged: &LineStatMap,
+    unstaged: &LineStatMap,
+) -> bool {
+    let mut changed = false;
+    for (rows, stats) in [
+        (&mut status.staged, staged),
+        (&mut status.unstaged, unstaged),
+    ] {
+        for row in rows {
+            if let Some(&(adds, dels)) = stats.get(&row.path) {
+                if row.additions != adds || row.deletions != dels {
+                    row.additions = adds;
+                    row.deletions = dels;
+                    changed = true;
+                }
+            }
+        }
+    }
+    changed
+}
+
 impl GitProject {
+    /// Publish a priority subset of on-screen file stats first, then all other
+    /// counts, without blocking a user-visible file status or history refresh.
+    /// Ref/index mutations invalidate the captured generation and discard late
+    /// results; there is never a stale background write into a new status.
+    pub fn schedule_deferred_line_stats(
+        &mut self,
+        priority_worktree: PathBuf,
+        priority_paths: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        if !rgitui_settings::change_line_stats_enabled() {
+            return;
+        }
+        let generation = self.refresh_generation;
+        let scheduled = generation.wrapping_add(1);
+        if self.refresh_caches.line_stats_queued_generation
+            .swap(scheduled, Ordering::AcqRel) == scheduled
+        {
+            return;
+        }
+        let epoch = self.refresh_caches.status_refresh_epoch();
+        let mut targets = Vec::new();
+        let make_target = |path: PathBuf, status: &WorkingTreeStatus| DeferredLineStatTarget {
+            worktree: path,
+            staged_paths: status.staged.iter().map(|file| file.path.clone()).collect(),
+            unstaged_paths: status.unstaged.iter().map(|file| file.path.clone()).collect(),
+        };
+        if !self.status.staged.is_empty() || !self.status.unstaged.is_empty() {
+            targets.push(make_target(self.repo_path.clone(), &self.status));
+        }
+        for worktree in &self.worktrees {
+            if worktree.is_current {
+                continue;
+            }
+            if let Some(status) = &worktree.status {
+                if !status.staged.is_empty() || !status.unstaged.is_empty() {
+                    targets.push(make_target(worktree.path.clone(), status));
+                }
+            }
+        }
+        if targets.is_empty() {
+            return;
+        }
+        let cache = self.refresh_caches.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            // Prioritize the first visible rows, at most 24, to avoid a large
+            // unbounded pathspec when many thousands of files are modified.
+            let priority_paths = priority_paths.into_iter().take(24).collect::<Vec<_>>();
+            if !priority_paths.is_empty() {
+                let first_targets = targets.clone();
+                let first_worktree = priority_worktree.clone();
+                let first_paths = priority_paths.clone();
+                let first = cx.background_executor().spawn(async move {
+                    compute_deferred_stats(
+                        &first_targets, &first_worktree, &first_paths, true,
+                    )
+                }).await;
+                let _ = cx.update(|cx| {
+                    this.update(cx, |project, cx| {
+                        if project.refresh_generation != generation
+                            || cache.status_refresh_epoch() != epoch
+                        {
+                            return;
+                        }
+                        if project.apply_deferred_stats(&first) {
+                            cx.emit(GitProjectEvent::LineStatsUpdated);
+                            cx.notify();
+                        }
+                    })
+                });
+            }
+            let remaining = cx.background_executor().spawn(async move {
+                compute_deferred_stats(&targets, &priority_worktree, &[], false)
+            }).await;
+            let _ = cx.update(|cx| {
+                this.update(cx, |project, cx| {
+                    if project.refresh_generation != generation
+                        || cache.status_refresh_epoch() != epoch
+                    {
+                        log::debug!(
+                            "deferred line stats dropped: status changed during calculation"
+                        );
+                        return;
+                    }
+                    if project.apply_deferred_stats(&remaining) {
+                        cx.emit(GitProjectEvent::LineStatsUpdated);
+                        cx.notify();
+                    }
+                })
+            });
+        }).detach();
+    }
+
+    fn apply_deferred_stats(&mut self, results: &[LineStatResult]) -> bool {
+        let mut changed = false;
+        for (path, staged, unstaged) in results {
+            if path == &self.repo_path {
+                changed |= merge_line_stats(
+                    Arc::make_mut(&mut self.status), staged, unstaged,
+                );
+            }
+            for wt in &mut self.worktrees {
+                if &wt.path == path {
+                    if let Some(status) = wt.status.as_mut() {
+                        changed |= merge_line_stats(status, staged, unstaged);
+                    }
+                }
+            }
+        }
+        changed
+    }
+
+
     /// Refresh all state asynchronously on a background thread.
     /// Uses two-phase loading: the first batch of commits loads quickly so the
     /// UI appears populated during the splash animation, then the remainder
