@@ -1008,7 +1008,10 @@ mod push_auto_pull_tests {
                 .unwrap()
                 .index()
                 .unwrap()
-                .has_conflicts()
+                .conflicts()
+                .unwrap()
+                .count()
+                > 0
         );
     }
 }
