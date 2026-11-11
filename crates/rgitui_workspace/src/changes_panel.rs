@@ -248,6 +248,14 @@ impl ChangesPanel {
         cx.notify();
     }
 
+    pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_handle.focus(window, cx);
+    }
+
+    pub fn is_focused(&self, window: &Window) -> bool {
+        self.focus_handle.is_focused(window)
+    }
+
     fn rebuild_filter(&mut self) {
         let needle = self.filter.to_lowercase();
         self.visible = Arc::new(

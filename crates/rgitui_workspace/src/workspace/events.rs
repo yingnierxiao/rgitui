@@ -1468,6 +1468,9 @@ pub(super) fn subscribe_sidebar(
                 let p = path.clone();
                 let is_staged = *staged;
                 let repo_path = this.effective_worktree_path(cx);
+                if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.sidebar == sidebar_ref) {
+                    tab.bottom_panel_mode = BottomPanelMode::Diff;
+                }
                 let dv = diff_viewer.clone();
                 let dp = detail_panel_ref.clone();
                 let source = DiffSource::working_tree(is_staged);
@@ -1555,6 +1558,9 @@ pub(super) fn subscribe_sidebar(
                 .detach();
             }
             SidebarEvent::ConflictFileSelected(path) => {
+                if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.sidebar == sidebar_ref) {
+                    tab.bottom_panel_mode = BottomPanelMode::Diff;
+                }
                 let path_buf = std::path::PathBuf::from(path);
                 let path_string = path.clone();
                 let repo_path = this

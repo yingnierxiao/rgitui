@@ -251,6 +251,7 @@ pub(super) enum FocusedPanel {
     Graph,
     DetailPanel,
     DiffViewer,
+    ChangesPanel,
 }
 
 impl FocusedPanel {
@@ -260,17 +261,19 @@ impl FocusedPanel {
             Self::Sidebar => Self::Graph,
             Self::Graph => Self::DetailPanel,
             Self::DetailPanel => Self::DiffViewer,
-            Self::DiffViewer => Self::Sidebar,
+            Self::DiffViewer => Self::ChangesPanel,
+            Self::ChangesPanel => Self::Sidebar,
         }
     }
 
     /// The panel before this one in Tab order.
     fn prev(self) -> Self {
         match self {
-            Self::Sidebar => Self::DiffViewer,
+            Self::Sidebar => Self::ChangesPanel,
             Self::Graph => Self::Sidebar,
             Self::DetailPanel => Self::Graph,
             Self::DiffViewer => Self::DetailPanel,
+            Self::ChangesPanel => Self::DiffViewer,
         }
     }
 
@@ -288,17 +291,27 @@ impl FocusedPanel {
     /// Where Tab (`forward`) or Shift+Tab moves focus from `current`, stepping
     /// over the graph while it is hidden. With nothing focused the cycle starts
     /// at the graph, which [`Self::available`] then resolves.
-    fn cycle(current: Option<Self>, forward: bool, graph_hidden: bool) -> Self {
+    fn cycle(
+        current: Option<Self>,
+        forward: bool,
+        graph_hidden: bool,
+        changes_visible: bool,
+    ) -> Self {
         let step = |panel: Self| if forward { panel.next() } else { panel.prev() };
         let Some(current) = current else {
             return Self::Graph;
         };
-        let target = step(current);
-        if graph_hidden && target == Self::Graph {
-            step(target)
-        } else {
-            target
+        let mut target = step(current);
+        for _ in 0..5 {
+            if (graph_hidden && target == Self::Graph)
+                || (!changes_visible && target == Self::ChangesPanel)
+            {
+                target = step(target);
+            } else {
+                break;
+            }
         }
+        target
     }
 }
 
@@ -916,6 +929,11 @@ impl Workspace {
             if tab.detail_panel.read(cx).is_focused(window) {
                 return Some(FocusedPanel::DetailPanel);
             }
+            if tab.right_panel_mode == RightPanelMode::Details
+                && tab.changes_panel.read(cx).is_focused(window)
+            {
+                return Some(FocusedPanel::ChangesPanel);
+            }
             // Every view the bottom panel can show counts: with the graph hidden,
             // one left unrecognised would start the Tab cycle at the graph,
             // which resolves straight back to the bottom panel.
@@ -929,14 +947,32 @@ impl Workspace {
     /// Cycle focus to the next panel in order.
     pub(super) fn focus_next_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let current = self.current_focused_panel(window, cx);
-        let next = FocusedPanel::cycle(current, true, self.layout.graph_hidden);
+        let changes_visible = self
+            .tabs
+            .get(self.active_tab)
+            .is_some_and(|tab| tab.right_panel_mode == RightPanelMode::Details);
+        let next = FocusedPanel::cycle(
+            current,
+            true,
+            self.layout.graph_hidden,
+            changes_visible,
+        );
         self.focus_panel(next, window, cx);
     }
 
     /// Cycle focus to the previous panel in order.
     pub(super) fn focus_prev_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let current = self.current_focused_panel(window, cx);
-        let prev = FocusedPanel::cycle(current, false, self.layout.graph_hidden);
+        let changes_visible = self
+            .tabs
+            .get(self.active_tab)
+            .is_some_and(|tab| tab.right_panel_mode == RightPanelMode::Details);
+        let prev = FocusedPanel::cycle(
+            current,
+            false,
+            self.layout.graph_hidden,
+            changes_visible,
+        );
         self.focus_panel(prev, window, cx);
     }
 
@@ -957,6 +993,13 @@ impl Workspace {
                 }
                 FocusedPanel::DetailPanel => {
                     tab.detail_panel.update(cx, |d, cx| d.focus(window, cx));
+                }
+                FocusedPanel::ChangesPanel => {
+                    if tab.right_panel_mode == RightPanelMode::Details {
+                        tab.changes_panel.update(cx, |p, cx| p.focus(window, cx));
+                    } else {
+                        tab.sidebar.update(cx, |s, cx| s.focus(window, cx));
+                    }
                 }
                 // Only the view the bottom panel is showing is drawn; focusing
                 // any other would strand focus on an element missing from the
@@ -1090,33 +1133,40 @@ mod tests {
     }
 
     #[test]
-    fn tab_order_is_unchanged_while_the_graph_shows() {
+    fn tab_order_includes_the_visible_changes_panel() {
         use FocusedPanel::*;
-        assert_eq!(FocusedPanel::cycle(Some(Sidebar), true, false), Graph);
-        assert_eq!(FocusedPanel::cycle(Some(Graph), true, false), DetailPanel);
-        assert_eq!(FocusedPanel::cycle(Some(DetailPanel), false, false), Graph);
-        assert_eq!(FocusedPanel::cycle(Some(Sidebar), false, false), DiffViewer);
-        assert_eq!(FocusedPanel::cycle(None, true, false), Graph);
-        assert_eq!(FocusedPanel::cycle(None, false, false), Graph);
+        assert_eq!(FocusedPanel::cycle(Some(Sidebar), true, false, true), Graph);
+        assert_eq!(FocusedPanel::cycle(Some(Graph), true, false, true), DetailPanel);
+        assert_eq!(FocusedPanel::cycle(Some(DetailPanel), false, false, true), Graph);
+        assert_eq!(FocusedPanel::cycle(Some(Sidebar), false, false, true), ChangesPanel);
+        assert_eq!(FocusedPanel::cycle(Some(DiffViewer), true, false, true), ChangesPanel);
+        assert_eq!(FocusedPanel::cycle(None, true, false, true), Graph);
+        assert_eq!(FocusedPanel::cycle(None, false, false, true), Graph);
     }
 
     #[test]
-    fn tab_order_steps_over_a_hidden_graph() {
+    fn tab_order_skips_hidden_graph_and_changes_panel() {
         use FocusedPanel::*;
-        assert_eq!(FocusedPanel::cycle(Some(Sidebar), true, true), DetailPanel);
-        assert_eq!(FocusedPanel::cycle(Some(DetailPanel), false, true), Sidebar);
+        assert_eq!(FocusedPanel::cycle(Some(Sidebar), true, true, true), DetailPanel);
+        assert_eq!(FocusedPanel::cycle(Some(DetailPanel), false, true, true), Sidebar);
 
         let lap = |forward: bool| {
             let mut panel = Sidebar;
-            (0..3)
+            (0..4)
                 .map(|_| {
-                    panel = FocusedPanel::cycle(Some(panel), forward, true);
+                    panel = FocusedPanel::cycle(Some(panel), forward, true, true);
                     panel
                 })
                 .collect::<Vec<_>>()
         };
-        assert_eq!(lap(true), [DetailPanel, DiffViewer, Sidebar]);
-        assert_eq!(lap(false), [DiffViewer, DetailPanel, Sidebar]);
+        assert_eq!(lap(true), [DetailPanel, DiffViewer, ChangesPanel, Sidebar]);
+        assert_eq!(lap(false), [ChangesPanel, DiffViewer, DetailPanel, Sidebar]);
+
+        assert_eq!(FocusedPanel::cycle(Some(DiffViewer), true, false, false), Sidebar);
+        assert_eq!(
+            FocusedPanel::cycle(Some(Sidebar), false, true, false),
+            DiffViewer
+        );
     }
 
     /// Initial focus, focus restoration and Alt+2 all ask for the graph by
@@ -1126,11 +1176,11 @@ mod tests {
         use FocusedPanel::*;
         assert_eq!(Graph.available(true), DiffViewer);
         assert_eq!(Graph.available(false), Graph);
-        for panel in [Sidebar, DetailPanel, DiffViewer] {
+        for panel in [Sidebar, DetailPanel, DiffViewer, ChangesPanel] {
             assert_eq!(panel.available(true), panel);
         }
         assert_eq!(
-            FocusedPanel::cycle(None, true, true).available(true),
+            FocusedPanel::cycle(None, true, true, true).available(true),
             DiffViewer
         );
     }
