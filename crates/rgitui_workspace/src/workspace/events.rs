@@ -1392,24 +1392,14 @@ pub(super) fn subscribe_project(cx: &mut Context<Workspace>, subs: ProjectSubscr
                             .filter(|details| !details.translated().is_empty())
                         {
                             let now = Instant::now();
-                            let is_pull = update.kind == GitOperationKind::Pull;
                             this.operations.last_operation_output = Some(OperationOutput {
                                 operation: update.kind.name(),
                                 output: details.clone(),
                                 is_error: false,
                                 timestamp: now,
-                                // Pull output often includes fetched refs, merge
-                                // results and conflicts. Keep it readable by
-                                // default instead of showing only the first line.
-                                expanded: is_pull,
+                                expanded: false,
                             });
-                            // Completed Pull logs are user-dismissed, not
-                            // automatically removed after ten seconds.
-                            // Other successful operation output keeps its
-                            // existing transient behavior.
-                            if !is_pull {
-                                this.schedule_operation_output_auto_hide(now, cx);
-                            }
+                            this.schedule_operation_output_auto_hide(now, cx);
                         }
                         this.show_toast(update.summary.translated(), ToastKind::Success, cx);
                     }
