@@ -67,7 +67,9 @@ impl Workspace {
         let reflog_view = cx.new(crate::ReflogView::new);
         let bisect_view = cx.new(crate::BisectView::new);
         let submodule_view = cx.new(crate::SubmoduleView::new);
-        let detail_panel = cx.new(crate::DetailPanel::new);
+        // The History sidebar now lives on the right; reuse the existing
+        // commit changed-files list alongside the central Diff viewer.
+        let detail_panel = cx.new(crate::DetailPanel::new_file_list);
         let sidebar = cx.new(crate::Sidebar::new);
         let changes_panel = cx.new(|cx| crate::ChangesPanel::new(sidebar.downgrade(), cx));
         let commit_panel = cx.new(crate::CommitPanel::new);
