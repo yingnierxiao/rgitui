@@ -207,6 +207,7 @@ english_messages! {
     "detail.switch_to_tree.tooltip" => "Switch to Tree view (v)",
     "diff.empty.description" => "Click a file in the sidebar or detail panel",
     "diff.empty.title" => "Select a file to view changes",
+    "diff.no_text_changes" => "This file changed, but has no text diff (binary, empty, or metadata-only).",
     "diff.file" => "File",
     "diff.header.conflict_resolver" => "Conflict Resolver",
     "diff.header.diff" => "Diff",
