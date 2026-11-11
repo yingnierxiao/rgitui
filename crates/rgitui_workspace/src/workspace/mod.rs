@@ -77,6 +77,8 @@ pub(super) enum BottomPanelMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RightPanelMode {
     Details,
+    /// Commit graph/history, mutually exclusive with the changes list.
+    History,
     Issues,
     PullRequests,
     BranchHealth,
@@ -923,7 +925,9 @@ impl Workspace {
             if tab.sidebar.read(cx).is_focused(window) {
                 return Some(FocusedPanel::Sidebar);
             }
-            if tab.graph.read(cx).is_focused(window) {
+            if tab.right_panel_mode == RightPanelMode::History
+                && tab.graph.read(cx).is_focused(window)
+            {
                 return Some(FocusedPanel::Graph);
             }
             if tab.detail_panel.read(cx).is_focused(window) {
@@ -954,7 +958,9 @@ impl Workspace {
         let next = FocusedPanel::cycle(
             current,
             true,
-            self.layout.graph_hidden,
+            self.tabs
+                .get(self.active_tab)
+                .is_none_or(|tab| tab.right_panel_mode != RightPanelMode::History),
             changes_visible,
         );
         self.focus_panel(next, window, cx);
@@ -970,7 +976,9 @@ impl Workspace {
         let prev = FocusedPanel::cycle(
             current,
             false,
-            self.layout.graph_hidden,
+            self.tabs
+                .get(self.active_tab)
+                .is_none_or(|tab| tab.right_panel_mode != RightPanelMode::History),
             changes_visible,
         );
         self.focus_panel(prev, window, cx);
@@ -983,8 +991,16 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if panel == FocusedPanel::Graph {
+            // Reveal history before focusing a graph that was previously
+            // unmounted by the Changes tab.
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                tab.right_panel_mode = RightPanelMode::History;
+                cx.notify();
+            }
+        }
         if let Some(tab) = self.tabs.get(self.active_tab) {
-            match panel.available(self.layout.graph_hidden) {
+            match panel.available(false) {
                 FocusedPanel::Sidebar => {
                     tab.sidebar.update(cx, |s, cx| s.focus(window, cx));
                 }
