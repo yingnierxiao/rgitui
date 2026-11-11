@@ -436,13 +436,11 @@ impl ChangesPanel {
         cx: &mut Context<Self>,
     ) {
         let updated = combine_changes(staged, unstaged);
-        // A watcher refresh must not undo the user's checkbox choices.
-        // Only remove overrides for paths that have genuinely disappeared.
-        let before = self.overrides.len();
-        Arc::make_mut(&mut self.overrides).retain(|path, _| {
-            updated.binary_search_by(|row| row.path.cmp(path)).is_ok()
-        });
-        if self.rows.as_ref() == &updated && before == self.overrides.len() {
+        // A repository watcher may deliver an older or intermediate status
+        // snapshot while the user is clicking. Never discard virtual choices
+        // based on that snapshot: absent paths are ignored by commit_selection
+        // and choices are removed explicitly after a successful commit.
+        if self.rows.as_ref() == &updated {
             return;
         }
         if self
@@ -678,6 +676,37 @@ impl ChangesPanel {
         self.set_virtual_paths(&paths, desired, cx);
     }
 
+    /// Resolve a click against the path captured when the element was drawn.
+    /// A filter, sort, or watcher refresh can reorder virtual-list row numbers
+    /// before an already queued click callback is dispatched.
+    fn visible_index_for_path(&self, hint: usize, path: &Path) -> Option<usize> {
+        if self
+            .visible
+            .get(hint)
+            .and_then(|index| self.rows.get(*index))
+            .is_some_and(|row| row.path.as_path() == path)
+        {
+            Some(hint)
+        } else {
+            self.visible
+                .iter()
+                .position(|index| self.rows[*index].path.as_path() == path)
+        }
+    }
+
+    fn select_visible_path(
+        &mut self,
+        path: &Path,
+        hint: usize,
+        extend: bool,
+        additive: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(current) = self.visible_index_for_path(hint, path) {
+            self.select_visible_row(current, extend, additive, cx);
+        }
+    }
+
     /// Regular click selects one row, Ctrl/Cmd toggles individual rows and
     /// Shift extends the range from the last unmodified click.
     fn select_visible_row(
@@ -712,23 +741,25 @@ impl ChangesPanel {
     /// Shift-clicking a checkbox applies the choice across the visible range.
     fn toggle_checkbox(
         &mut self,
-        row_number: usize,
+        clicked_path: &Path,
+        row_hint: usize,
         extend: bool,
         cx: &mut Context<Self>,
     ) {
         if self.commit_in_progress {
             return;
         }
-        let Some(index) = self.visible.get(row_number).copied() else {
+        let Some(row_number) = self.visible_index_for_path(row_hint, clicked_path) else {
+            // The row disappeared after an in-flight click; do not toggle a
+            // different file that happened to inherit its previous row number.
             return;
         };
+        let index = self.visible[row_number];
         let path = self.rows[index].path.clone();
         if extend || !self.selected_paths.contains(&path) {
             self.select_visible_row(row_number, extend, false, cx);
         }
-        let Some(row) = self.rows.get(index) else {
-            return;
-        };
+        let row = &self.rows[index];
         if row.has_conflict() {
             return;
         }
@@ -737,12 +768,25 @@ impl ChangesPanel {
         } else {
             CheckState::Checked
         };
-        let paths = if self.selected_paths.len() == 1 {
-            vec![path]
-        } else {
+        let paths = if self.selected_paths.len() > 1
+            && self.selected_paths.contains(&path)
+        {
             selected_virtual_paths(&self.rows, &self.visible, &self.selected_paths)
+        } else {
+            vec![path.clone()]
         };
         self.set_virtual_paths(&paths, target, cx);
+
+        // A group checkbox click is a one-shot batch action. Keeping multiple
+        // rows armed makes the very next rapid click reverse the entire group
+        // again, which looks like all checkboxes randomly became unchecked.
+        if paths.len() > 1 {
+            self.selected_paths = Arc::new(HashSet::from([path.clone()]));
+            self.selection_anchor = Some(path.clone());
+            self.selected_path = Some(path);
+            self.selected_row = Some(row_number);
+            cx.notify();
+        }
     }
 
     fn select_all_visible(&mut self, cx: &mut Context<Self>) {
@@ -775,7 +819,10 @@ impl ChangesPanel {
 
     fn toggle_selected(&mut self, cx: &mut Context<Self>) {
         if let Some(row_number) = self.selected_row {
-            self.toggle_checkbox(row_number, false, cx);
+            if let Some(index) = self.visible.get(row_number) {
+                let path = self.rows[*index].path.clone();
+                self.toggle_checkbox(&path, row_number, false, cx);
+            }
         }
     }
 
@@ -863,6 +910,8 @@ impl Render for ChangesPanel {
                         let sidebar_preview = sidebar.clone();
                         let weak_panel = panel.clone();
                         let path_tooltip = file_path.clone();
+                        let row_click_path = row.path.clone();
+                        let checkbox_click_path = row.path.clone();
                         let row_bg = row_colors.ghost_element_selected;
                         let row_hover = row_colors.ghost_element_hover;
                         let accent = row_colors.text_accent;
@@ -882,12 +931,12 @@ impl Render for ChangesPanel {
                             })
                             .hover(move |el| el.bg(row_hover))
                             .cursor_pointer()
-                            .tooltip(Tooltip::text(path_tooltip))
                             .on_click(move |event: &ClickEvent, window: &mut Window, cx: &mut App| {
                                 let modifiers = event.modifiers();
                                 weak_panel
                                     .update(cx, |this, cx| {
-                                        this.select_visible_row(
+                                        this.select_visible_path(
+                                            &row_click_path,
                                             row_number,
                                             modifiers.shift,
                                             modifiers.secondary(),
@@ -916,7 +965,12 @@ impl Render for ChangesPanel {
                                     cx.stop_propagation();
                                     weak_panel_toggle
                                         .update(cx, |this, cx| {
-                                            this.toggle_checkbox(row_number, extend, cx);
+                                            this.toggle_checkbox(
+                                                &checkbox_click_path,
+                                                row_number,
+                                                extend,
+                                                cx,
+                                            );
                                         })
                                         .ok();
                                 }),
@@ -928,6 +982,10 @@ impl Render for ChangesPanel {
                                     .min_w_0()
                                     .gap(px(4.))
                                     .overflow_hidden()
+                                    // The checkbox must never be inside a
+                                    // tooltip hit area: rapid pointer clicks
+                                    // should only target the checkbox itself.
+                                    .tooltip(Tooltip::text(path_tooltip))
                                     .child(
                                         Label::new(filename)
                                             .size(LabelSize::XSmall)
