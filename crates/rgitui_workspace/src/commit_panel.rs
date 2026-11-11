@@ -140,6 +140,7 @@ pub struct CommitPanel {
     description_editor: Entity<TextInput>,
     amend: bool,
     staged_count: usize,
+    committing: bool,
     ai_state: AiState,
     /// The message the AI replaced, so the overwrite can be undone.
     /// `UndoStack` covers git operations, not the commit editor.
@@ -217,6 +218,7 @@ impl CommitPanel {
             description_editor,
             amend: false,
             staged_count: 0,
+            committing: false,
             ai_state: AiState::Idle,
             ai_undo: None,
             regenerate_menu_open: false,
@@ -253,7 +255,9 @@ impl CommitPanel {
     /// Whether a commit can be made right now: a summary has been typed and
     /// something is staged.
     pub fn can_commit(&self, cx: &Context<Self>) -> bool {
-        !self.summary_editor.read(cx).is_empty() && self.staged_count > 0
+        !self.committing
+            && !self.summary_editor.read(cx).is_empty()
+            && self.staged_count > 0
     }
 
     /// Emit a commit request and reset the panel.
@@ -267,20 +271,31 @@ impl CommitPanel {
             return false;
         }
 
+        // Freeze the submitted message while the temporary index and commit
+        // are built. Do not clear it until the operation actually succeeds.
+        self.committing = true;
+        self.set_editors_read_only(true, cx);
         cx.emit(CommitPanelEvent::CommitRequested {
             message: self.message(cx),
             amend: self.amend,
         });
-
-        self.summary_editor
-            .update(cx, |e: &mut TextInput, cx| e.clear(cx));
-        self.description_editor
-            .update(cx, |e: &mut TextInput, cx| e.clear(cx));
-        self.amend = false;
-        self.co_authors.clear();
-        self.adding_co_author = false;
         cx.notify();
         true
+    }
+
+    pub fn complete_commit(&mut self, succeeded: bool, cx: &mut Context<Self>) {
+        self.committing = false;
+        if succeeded {
+            self.summary_editor
+                .update(cx, |e: &mut TextInput, cx| e.clear(cx));
+            self.description_editor
+                .update(cx, |e: &mut TextInput, cx| e.clear(cx));
+            self.amend = false;
+            self.co_authors.clear();
+            self.adding_co_author = false;
+        }
+        self.set_editors_read_only(matches!(self.ai_state, AiState::Generating { .. }), cx);
+        cx.notify();
     }
 
     pub fn message(&self, cx: &Context<Self>) -> String {
