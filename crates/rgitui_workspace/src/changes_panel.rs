@@ -735,6 +735,12 @@ impl ChangesPanel {
     }
 
     fn select_all_visible(&mut self, cx: &mut Context<Self>) {
+        if self.selected_row.is_none() && !self.visible.is_empty() {
+            let first_path = self.rows[self.visible[0]].path.clone();
+            self.selected_path = Some(first_path.clone());
+            self.selected_row = Some(0);
+            self.selection_anchor = Some(first_path);
+        }
         self.selected_paths = Arc::new(
             self.visible
                 .iter()
