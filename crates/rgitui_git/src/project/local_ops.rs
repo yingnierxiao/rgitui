@@ -187,9 +187,16 @@ fn tree_for_virtual_selection(
         );
     }
     let temporary = tempfile::Builder::new()
-        .prefix("rgitui-commit-index-")
+        .prefix("rgitui-commit-paths-")
         .tempdir()?;
-    let temp_index = temporary.path().join("index");
+    // Keep the private index beside the real one so Git's split-index
+    // sharedindex references continue to resolve; TempPath closes the OS file
+    // handle before Git rewrites it (essential on Windows) and deletes on drop.
+    let temp_index = tempfile::Builder::new()
+        .prefix("rgitui-commit-index-")
+        .tempfile_in(repo.path())?
+        .into_temp_path();
+    std::fs::remove_file(&temp_index)?;
     let real_index = repo.path().join("index");
     if real_index.exists() {
         std::fs::copy(&real_index, &temp_index)
