@@ -3,6 +3,23 @@ use rgitui_i18n::{msg, Message};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// How a virtually selected file contributes to a commit. File checkboxes
+/// never mutate the real Git index; the commit builder uses an isolated index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitFileContents {
+    /// Use the current working-tree contents, equivalent to staging the file.
+    WorkingTree,
+    /// Keep the existing staged snapshot for a partially staged file.
+    Staged,
+}
+
+/// A commit selection captured from one worktree at the moment Commit is pressed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitSelectedFile {
+    pub path: PathBuf,
+    pub contents: CommitFileContents,
+}
+
 /// A single line from a global content search result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchResult {
