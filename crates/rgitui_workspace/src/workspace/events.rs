@@ -1473,7 +1473,10 @@ pub(super) fn subscribe_sidebar(
                 let is_staged = *staged;
                 let repo_path = this.effective_worktree_path(cx);
                 if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.sidebar == sidebar_ref) {
+                    // Working tree and conflict files return to Changes.
+                    tab.right_panel_mode = super::RightPanelMode::Details;
                     tab.bottom_panel_mode = BottomPanelMode::Diff;
+                    cx.notify();
                 }
                 let dv = diff_viewer.clone();
                 let dp = detail_panel_ref.clone();
@@ -1563,7 +1566,10 @@ pub(super) fn subscribe_sidebar(
             }
             SidebarEvent::ConflictFileSelected(path) => {
                 if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.sidebar == sidebar_ref) {
+                    // Working tree and conflict files return to Changes.
+                    tab.right_panel_mode = super::RightPanelMode::Details;
                     tab.bottom_panel_mode = BottomPanelMode::Diff;
+                    cx.notify();
                 }
                 let path_buf = std::path::PathBuf::from(path);
                 let path_string = path.clone();
@@ -1784,6 +1790,10 @@ pub(super) fn subscribe_sidebar(
                 .detach();
             }
             SidebarEvent::TagSelected(name) => {
+                if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.sidebar == sidebar_ref) {
+                    tab.right_panel_mode = super::RightPanelMode::History;
+                    cx.notify();
+                }
                 let proj = project.read(cx);
                 if let Ok(oid) = proj.resolve_tag_to_oid(name) {
                     if let Some(tab) = this.tabs.get(this.active_tab) {
@@ -1796,6 +1806,10 @@ pub(super) fn subscribe_sidebar(
                 }
             }
             SidebarEvent::WorktreeSelected(index) => {
+                if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.sidebar == sidebar_ref) {
+                    tab.right_panel_mode = super::RightPanelMode::History;
+                    cx.notify();
+                }
                 let worktrees = project.read(cx).worktrees().to_vec();
                 if let Some(wt) = worktrees.get(*index) {
                     let inspecting = (!wt.is_current).then(|| super::InspectingWorktree {
@@ -1836,6 +1850,10 @@ pub(super) fn subscribe_sidebar(
                 }
             }
             SidebarEvent::BranchSelected(name) => {
+                if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.sidebar == sidebar_ref) {
+                    tab.right_panel_mode = super::RightPanelMode::History;
+                    cx.notify();
+                }
                 let proj = project.read(cx);
                 if let Ok(oid) = proj.resolve_branch_to_oid(name) {
                     if let Some(tab) = this.tabs.get(this.active_tab) {
@@ -2102,6 +2120,11 @@ pub(super) fn subscribe_graph(
                     this.update_command_context(cx);
                 }
                 GraphViewEvent::CommitSelected(oid) => {
+                    // History and commit diffs stay visible side-by-side.
+                    if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.project == project) {
+                        tab.bottom_panel_mode = BottomPanelMode::Diff;
+                        cx.notify();
+                    }
                     let commit_oid = *oid;
                     log::info!("CommitSelected: oid={:.7}", commit_oid);
 
@@ -2582,6 +2605,10 @@ pub(super) fn subscribe_detail_panel(
     cx.subscribe(detail_panel, {
         move |this, _dp, event: &DetailPanelEvent, cx| match event {
             DetailPanelEvent::FileSelected(file_diff, path, source) => {
+                if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.project == project) {
+                    tab.bottom_panel_mode = BottomPanelMode::Diff;
+                    cx.notify();
+                }
                 let p = path.clone();
                 let fd = file_diff.clone();
                 let source = source.clone();
