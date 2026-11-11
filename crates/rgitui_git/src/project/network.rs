@@ -831,6 +831,189 @@ impl GitProject {
 }
 
 #[cfg(test)]
+mod push_auto_pull_tests {
+    use super::{is_remote_ahead_rejection, push_with_auto_pull};
+    use git2::{Repository, RepositoryState};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use tempfile::TempDir;
+
+    fn git(path: &Path, args: &[&str]) -> String {
+        let output = super::super::git_command()
+            .current_dir(path)
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .expect("git executable is required by rgitui");
+        assert!(
+            output.status.success(),
+            "git {} failed:\n{}\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    fn commit(path: &Path, filename: &str, content: &str, message: &str) {
+        fs::write(path.join(filename), content).unwrap();
+        git(path, &["add", "--", filename]);
+        git(path, &["commit", "-m", message]);
+    }
+
+    struct TestRepos {
+        _dir: TempDir,
+        remote: PathBuf,
+        local: PathBuf,
+        peer: PathBuf,
+    }
+
+    impl TestRepos {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let remote = dir.path().join("origin.git");
+            let local = dir.path().join("local");
+            let peer = dir.path().join("peer");
+            git(
+                dir.path(),
+                &["init", "--bare", "--initial-branch=dev", remote.to_str().unwrap()],
+            );
+            git(
+                dir.path(),
+                &["init", "--initial-branch=dev", local.to_str().unwrap()],
+            );
+            git(&local, &["config", "user.name", "Local Tester"]);
+            git(&local, &["config", "user.email", "local@example.test"]);
+            commit(&local, "base.txt", "base\n", "base");
+            git(&local, &["remote", "add", "origin", remote.to_str().unwrap()]);
+            git(&local, &["push", "-u", "origin", "dev"]);
+            git(
+                dir.path(),
+                &["clone", "--branch", "dev", remote.to_str().unwrap(), peer.to_str().unwrap()],
+            );
+            git(&peer, &["config", "user.name", "Peer Tester"]);
+            git(&peer, &["config", "user.email", "peer@example.test"]);
+            Self {
+                _dir: dir,
+                remote,
+                local,
+                peer,
+            }
+        }
+
+        fn push_peer(&self, filename: &str, content: &str) {
+            commit(&self.peer, filename, content, "peer change");
+            git(&self.peer, &["push", "origin", "dev"]);
+        }
+
+        fn push_with_recovery(&self, pulled: &mut bool) -> anyhow::Result<Option<String>> {
+            push_with_auto_pull(
+                &self.local,
+                &["push", "origin", "HEAD:dev"],
+                "origin",
+                "dev",
+                false,
+                pulled,
+            )
+        }
+
+        fn remote_head(&self) -> String {
+            git(&self.remote, &["rev-parse", "refs/heads/dev"])
+        }
+    }
+
+    #[test]
+    fn only_remote_ahead_rejections_are_auto_recoverable() {
+        assert!(is_remote_ahead_rejection(
+            " ! [rejected] HEAD -> dev (fetch first)\nerror: failed to push some refs"
+        ));
+        assert!(is_remote_ahead_rejection(
+            " ! [rejected] HEAD -> dev (non-fast-forward)"
+        ));
+        assert!(!is_remote_ahead_rejection(
+            " ! [remote rejected] HEAD -> dev (pre-receive hook declined)"
+        ));
+        assert!(!is_remote_ahead_rejection("Permission denied (publickey)"));
+        assert!(!is_remote_ahead_rejection(
+            " ! [rejected] HEAD -> dev (stale info)"
+        ));
+    }
+
+    #[test]
+    fn rejected_divergent_push_pulls_and_retries_without_rewriting_commits() {
+        let repos = TestRepos::new();
+        repos.push_peer("peer.txt", "new remote file\n");
+        commit(&repos.local, "mine.txt", "new local file\n", "local change");
+        let original_local_head = git(&repos.local, &["rev-parse", "HEAD"]);
+        let mut pulled = false;
+        let result = repos.push_with_recovery(&mut pulled).unwrap();
+        assert!(pulled);
+        assert!(result.unwrap().contains("Automatically pulled origin/dev"));
+        assert_eq!(git(&repos.local, &["rev-parse", "HEAD"]), repos.remote_head());
+        let parents = git(&repos.local, &["show", "-s", "--format=%P", "HEAD"]);
+        assert_eq!(parents.split_whitespace().count(), 2);
+        assert!(parents.split_whitespace().any(|sha| sha == original_local_head));
+        assert!(repos.local.join("peer.txt").exists());
+        assert!(repos.local.join("mine.txt").exists());
+    }
+
+    #[test]
+    fn rejected_push_fast_forwards_when_local_has_no_new_commits() {
+        let repos = TestRepos::new();
+        repos.push_peer("peer.txt", "remote update\n");
+        let mut pulled = false;
+        repos.push_with_recovery(&mut pulled).unwrap();
+        assert!(pulled);
+        assert_eq!(git(&repos.local, &["rev-parse", "HEAD"]), repos.remote_head());
+        let parents = git(&repos.local, &["show", "-s", "--format=%P", "HEAD"]);
+        assert_eq!(parents.split_whitespace().count(), 1);
+    }
+
+    #[test]
+    fn uncommitted_worktree_is_never_modified_by_automatic_pull() {
+        let repos = TestRepos::new();
+        repos.push_peer("peer.txt", "remote update\n");
+        fs::write(repos.local.join("base.txt"), "unsaved local work\n").unwrap();
+        let previous_head = git(&repos.local, &["rev-parse", "HEAD"]);
+        let remote_head = repos.remote_head();
+        let mut pulled = false;
+        let error = repos.push_with_recovery(&mut pulled).unwrap_err();
+        assert!(error.to_string().contains("Commit or stash"));
+        assert!(!pulled);
+        assert_eq!(git(&repos.local, &["rev-parse", "HEAD"]), previous_head);
+        assert_eq!(repos.remote_head(), remote_head);
+        assert_eq!(
+            fs::read_to_string(repos.local.join("base.txt")).unwrap(),
+            "unsaved local work\n"
+        );
+    }
+
+    #[test]
+    fn merge_conflict_aborts_retry_and_keeps_conflict_for_resolution() {
+        let repos = TestRepos::new();
+        repos.push_peer("base.txt", "remote text\n");
+        commit(&repos.local, "base.txt", "local text\n", "local edit");
+        let remote_head = repos.remote_head();
+        let mut pulled = false;
+        let error = repos.push_with_recovery(&mut pulled).unwrap_err();
+        assert!(error.to_string().contains("Automatic pull"));
+        assert!(pulled);
+        assert_eq!(repos.remote_head(), remote_head);
+        assert_eq!(
+            Repository::open(&repos.local).unwrap().state(),
+            RepositoryState::Merge
+        );
+        assert!(
+            Repository::open(&repos.local)
+                .unwrap()
+                .index()
+                .unwrap()
+                .has_conflicts()
+        );
+    }
+}
+
+#[cfg(test)]
 mod pull_status_cache_tests {
     use super::pull_can_reuse_status_cache;
 
