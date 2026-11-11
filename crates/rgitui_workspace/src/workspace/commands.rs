@@ -208,7 +208,10 @@ impl Workspace {
             return;
         };
         let graph = tab.graph.clone();
-        let revealing = self.layout.graph_hidden;
+        let revealing = self
+            .tabs
+            .get(self.active_tab)
+            .is_none_or(|tab| tab.right_panel_mode != RightPanelMode::History);
         self.set_graph_hidden(false, cx);
         graph.update(cx, |graph, cx| {
             if revealing {
@@ -542,7 +545,7 @@ impl Workspace {
             CommandId::Search => {
                 // As in `toggle_graph_search`: a hidden graph comes back with
                 // its search open, never closed.
-                let revealing = self.layout.graph_hidden;
+                let revealing = tab.right_panel_mode != RightPanelMode::History;
                 self.set_graph_hidden(false, cx);
                 if !(revealing && tab.graph.read(cx).is_search_visible()) {
                     tab.graph.update(cx, |g, cx| {
