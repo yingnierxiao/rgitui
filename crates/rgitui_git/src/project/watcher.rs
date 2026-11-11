@@ -4,7 +4,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -270,6 +270,19 @@ impl IgnoreRepos {
 /// and taking any "yes" would let that answer suppress events for files the
 /// worktree itself tracks, leaving its status and diff stale while the user
 /// edits them. Only the innermost checkout has standing to answer.
+/// Git metadata that can affect statuses without modifying tracked refs or
+/// index. Lockfile/object/reflog events must NOT invalidate cached statuses.
+fn git_metadata_affects_status_without_fingerprint(path: &Path) -> bool {
+    match path.file_name().and_then(|name| name.to_str()) {
+        Some("config") | Some("config.worktree") => true,
+        Some("exclude") | Some("attributes") | Some("sparse-checkout") => path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .is_some_and(|name| name == "info"),
+        _ => false,
+    }
+}
+
 /// A Git-metadata notification can arrive after an explicit operation has
 /// already gathered and applied the resulting status snapshot. In that case the
 /// operation's refresh epoch proves the change is covered; do not schedule the
@@ -315,6 +328,8 @@ impl GitProject {
         // Set when something under a git directory changed, which is the only
         // time the fingerprint scan can tell us anything new.
         let git_dirty = Arc::new(AtomicBool::new(false));
+        let git_event_count = Arc::new(AtomicUsize::new(0));
+        let worktree_event_count = Arc::new(AtomicUsize::new(0));
 
         // One gitignore handle per watched checkout, kept in step with the
         // watched set by the poll loop below.
@@ -324,6 +339,8 @@ impl GitProject {
         {
             let dirty_flag = dirty.clone();
             let git_dirty_flag = git_dirty.clone();
+            let callback_git_events = git_event_count.clone();
+            let callback_worktree_events = worktree_event_count.clone();
             let callback_ignore_repos = ignore_repos.clone();
             let callback_status_cache = worktree_cache.clone();
             let callback_main_root = repo_path.clone();
@@ -341,19 +358,26 @@ impl GitProject {
                             .iter()
                             .all(|p| p.components().any(|c| c.as_os_str() == ".git"));
                         if dominated_by_git {
+                            callback_git_events.fetch_add(1, Ordering::Relaxed);
                             git_dirty_flag.store(true, Ordering::Relaxed);
-                            // Git metadata can change status semantics even when
-                            // the ref/index fingerprint is unchanged (for example
-                            // core.excludesFile or .git/info/exclude). Invalidate
-                            // every currently watched checkout and queue a refresh.
-                            let roots = callback_ignore_repos
-                                .lock()
-                                .map(|repos| repos.roots())
-                                .unwrap_or_else(|_| vec![callback_main_root.clone()]);
-                            for root in roots {
-                                callback_status_cache.mark_worktree_status_dirty(&root);
+                            // HEAD/index/refs are verified by the fingerprint
+                            // before invalidating status. Transient lockfile,
+                            // object and reflog writes do not change statuses.
+                            // Config/ignore files need the conservative path
+                            // because they are not in that fingerprint.
+                            if event.paths.iter().any(|path| {
+                                git_metadata_affects_status_without_fingerprint(path)
+                            }) {
+                                let roots = callback_ignore_repos
+                                    .lock()
+                                    .map(|repos| repos.roots())
+                                    .unwrap_or_else(|_| vec![callback_main_root.clone()]);
+                                for root in roots {
+                                    callback_status_cache.mark_worktree_status_dirty(&root);
+                                }
+                                dirty_flag.store(true, Ordering::Relaxed);
+                                log::debug!("watcher: Git config/ignore metadata changed");
                             }
-                            dirty_flag.store(true, Ordering::Relaxed);
                             return;
                         }
                         // Skip events where every changed path is gitignored
@@ -376,6 +400,7 @@ impl GitProject {
                             notify::EventKind::Create(_)
                             | notify::EventKind::Modify(_)
                             | notify::EventKind::Remove(_) => {
+                                callback_worktree_events.fetch_add(1, Ordering::Relaxed);
                                 if dirty_roots.is_empty() {
                                     // Unknown paths are conservatively attributed
                                     // to the main checkout rather than dropped.
@@ -439,6 +464,8 @@ impl GitProject {
             let ignore_repos = ignore_repos.clone();
             let last_fingerprint = last_fingerprint.clone();
             let dirty = dirty.clone();
+            let git_event_count = git_event_count.clone();
+            let worktree_event_count = worktree_event_count.clone();
             let repo_path = repo_path.clone();
             let main_git_dir = main_git_dir.clone();
             let common_git_dir = common_git_dir.clone();
@@ -638,12 +665,42 @@ impl GitProject {
                     }
 
                     if dirty.swap(false, Ordering::Relaxed) {
-                        // Debounce: coalesce a burst of events (e.g. `git checkout`
-                        // touching many files) into one refresh. `swap` already
-                        // cleared the flag; any event arriving during this wait or
-                        // the refresh below re-arms `dirty` and is picked up on the
-                        // next poll tick, so no refresh is lost.
-                        smol::Timer::after(Duration::from_millis(200)).await;
+                        // Wait until events stop arriving for 300ms (maximum
+                        // 1.2s), rather than refreshing for each 200ms chunk of
+                        // one large checkout/Unity import burst.
+                        let debounce_started = std::time::Instant::now();
+                        let mut last_count = worktree_event_count.load(Ordering::Relaxed)
+                            + git_event_count.load(Ordering::Relaxed);
+                        let mut quiet_ticks = 0;
+                        for _ in 0..8 {
+                            smol::Timer::after(Duration::from_millis(150)).await;
+                            let count = worktree_event_count.load(Ordering::Relaxed)
+                                + git_event_count.load(Ordering::Relaxed);
+                            if count == last_count {
+                                quiet_ticks += 1;
+                                if quiet_ticks >= 2 {
+                                    break;
+                                }
+                            } else {
+                                quiet_ticks = 0;
+                                last_count = count;
+                            }
+                        }
+                        // Events that arrived during debounce are included in
+                        // the imminent snapshot; those arriving afterward
+                        // re-arm dirty and trigger the next scan.
+                        dirty.swap(false, Ordering::Relaxed);
+                        let worktree_events = worktree_event_count.swap(0, Ordering::Relaxed);
+                        let git_events = git_event_count.swap(0, Ordering::Relaxed);
+                        log::info!(
+                            "watcher refresh trigger: worktree={} file_events={} git_events={} debounce={:?} status_epoch={} commits={}",
+                            repo_path.display(),
+                            worktree_events,
+                            git_events,
+                            debounce_started.elapsed(),
+                            worktree_cache.status_refresh_epoch(),
+                            effective_limit
+                        );
 
                         let path = repo_path.clone();
                         let cache = worktree_cache.clone();
