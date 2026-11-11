@@ -1276,11 +1276,11 @@ impl DetailPanel {
     }
     /// Shared files-only content for both the detailed metadata layout and
     /// the compact file list beside the commit Diff.
-    fn render_changed_files(
+    fn render_changed_files<E: ParentElement>(
         &self,
-        mut content: gpui::Div,
+        mut content: E,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> E {
         let colors = cx.colors().clone();
         // -- Changed Files Section --
         if let (Some(diff), Some(cached)) = (&self.commit_diff, &self.cached_file_tree) {
