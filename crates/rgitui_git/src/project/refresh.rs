@@ -3315,14 +3315,16 @@ mod commit_log_reuse_tests {
     fn concurrent_status_refreshes_reuse_a_single_checkout_scan() {
         let repo = TempRepo::with_commits(2);
         repo.write_file("concurrent.txt", "changed\n");
+        let path = repo.path().to_path_buf();
         let cache = Mutex::new(WorktreeStatusCache::default());
-        // Give two threads the same invalidation generation.
+        // Share only a path and the cache across threads, never a git2
+        // Repository handle.
         let (first, second) = std::thread::scope(|scope| {
             let a = scope.spawn(|| {
-                compute_working_tree_status(repo.path(), Some(&cache), false).unwrap()
+                compute_working_tree_status(&path, Some(&cache), false).unwrap()
             });
             let b = scope.spawn(|| {
-                compute_working_tree_status(repo.path(), Some(&cache), false).unwrap()
+                compute_working_tree_status(&path, Some(&cache), false).unwrap()
             });
             (a.join().unwrap(), b.join().unwrap())
         });
