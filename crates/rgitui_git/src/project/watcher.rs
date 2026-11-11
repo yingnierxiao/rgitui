@@ -802,6 +802,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn transient_git_metadata_does_not_force_expensive_status_rescan() {
+        assert!(!git_metadata_affects_status_without_fingerprint(
+            Path::new("/repo/.git/objects/ab/cdef")
+        ));
+        assert!(!git_metadata_affects_status_without_fingerprint(
+            Path::new("/repo/.git/index.lock")
+        ));
+        assert!(!git_metadata_affects_status_without_fingerprint(
+            Path::new("/repo/.git/logs/HEAD")
+        ));
+        assert!(git_metadata_affects_status_without_fingerprint(
+            Path::new("/repo/.git/info/exclude")
+        ));
+        assert!(git_metadata_affects_status_without_fingerprint(
+            Path::new("/repo/.git/config")
+        ));
+    }
+
+    #[test]
     fn operation_refresh_suppresses_duplicate_git_metadata_refresh() {
         assert!(!should_refresh_after_git_fingerprint_change(true, false));
         assert!(should_refresh_after_git_fingerprint_change(true, true));
