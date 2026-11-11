@@ -981,6 +981,8 @@ pub struct GraphView {
     show_search: bool,
     filter_matches: Vec<usize>,
     filter_match_set_arc: Arc<HashSet<usize>>,
+    /// Filtered results scroll separately from the complete commit graph.
+    search_results_scroll: UniformListScrollHandle,
     current_match: usize,
     search_editor: Entity<rgitui_ui::TextInput>,
     graph_focus: FocusHandle,
@@ -1067,9 +1069,12 @@ impl GraphView {
             row_height: 32.0,
             scroll_handle: UniformListScrollHandle::new(),
             context_menu: None,
-            show_search: false,
+            // The History tab always exposes author/title filtering. Search
+            // results use an inexpensive projection of already loaded commits.
+            show_search: true,
             filter_matches: Vec::new(),
             filter_match_set_arc: Arc::new(HashSet::new()),
+            search_results_scroll: UniformListScrollHandle::new(),
             current_match: 0,
             search_editor,
             graph_focus: cx.focus_handle(),
@@ -1861,7 +1866,10 @@ impl GraphView {
             cx.update(|cx| {
                 let _ = this.update(cx, |this, cx| {
                     this.update_search_filter(cx);
-                    this.jump_to_first_match(cx);
+                    // Do not fetch a new diff for every keystroke. Only a
+                    // click/Enter on a result selects and loads its commit.
+                    this.search_results_scroll
+                        .scroll_to_item(0, ScrollStrategy::Top);
                     cx.notify();
                 });
             });
@@ -1917,8 +1925,8 @@ impl GraphView {
         let commit_index = self.filter_matches[self.current_match];
         if let Some(list_index) = self.list_index_for_commit_index(commit_index) {
             self.select_list_index(list_index, cx);
-            self.scroll_handle
-                .scroll_to_item(list_index, ScrollStrategy::Top);
+            self.search_results_scroll
+                .scroll_to_item(self.current_match, ScrollStrategy::Nearest);
         }
     }
 
@@ -1935,8 +1943,8 @@ impl GraphView {
         let commit_index = self.filter_matches[self.current_match];
         if let Some(list_index) = self.list_index_for_commit_index(commit_index) {
             self.select_list_index(list_index, cx);
-            self.scroll_handle
-                .scroll_to_item(list_index, ScrollStrategy::Top);
+            self.search_results_scroll
+                .scroll_to_item(self.current_match, ScrollStrategy::Nearest);
         }
     }
 
@@ -1947,8 +1955,8 @@ impl GraphView {
             let commit_index = self.filter_matches[0];
             if let Some(list_index) = self.list_index_for_commit_index(commit_index) {
                 self.select_list_index(list_index, cx);
-                self.scroll_handle
-                    .scroll_to_item(list_index, ScrollStrategy::Top);
+                self.search_results_scroll
+                    .scroll_to_item(0, ScrollStrategy::Top);
             }
         }
     }
@@ -3401,7 +3409,98 @@ impl Render for GraphView {
             container = container.child(search_bar);
         }
 
-        container = container.child(list);
+        // A search query filters the visible history instead of merely
+        // highlighting matching commits in the full graph. A separate flat
+        // results list is intentional: non-adjacent commits cannot preserve
+        // the graph's connecting lanes when intervening rows are hidden.
+        // Keep the original graph untouched for the instant query-clear path.
+        if has_search_query {
+            let matching_indices = Arc::new(self.filter_matches.clone());
+            let matching_commits = self.commits.clone();
+            let selected_oid = self.selected_oid;
+            let result_view = cx.weak_entity();
+            let result_count = matching_indices.len();
+            let results = uniform_list(
+                "graph-filtered-commits",
+                result_count,
+                move |range: Range<usize>, _window: &mut Window, _cx: &mut App| {
+                    range
+                        .map(|result_index| {
+                            let Some(commit_index) =
+                                matching_indices.get(result_index).copied()
+                            else {
+                                return div().into_any_element();
+                            };
+                            let Some(commit) = matching_commits.get(commit_index) else {
+                                return div().into_any_element();
+                            };
+                            let title: SharedString = commit.summary.clone().into();
+                            let author: SharedString = commit.author.name.clone().into();
+                            let sha: SharedString = commit.short_id.clone().into();
+                            let active = selected_oid == Some(commit.oid);
+                            let result_view = result_view.clone();
+                            div()
+                                .id(ElementId::NamedInteger(
+                                    "graph-filter-result".into(),
+                                    result_index as u64,
+                                ))
+                                .h_flex()
+                                .w_full()
+                                .h(px(row_height))
+                                .px(px(10.))
+                                .gap(px(8.))
+                                .items_center()
+                                .cursor(CursorStyle::PointingHand)
+                                .bg(if active { selected_bg } else { panel_bg })
+                                .hover(move |style| {
+                                    style.bg(if active { selected_bg } else { hover_bg })
+                                })
+                                .on_click(move |_: &ClickEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    result_view
+                                        .update(cx, |graph, cx| {
+                                            graph.current_match = result_index;
+                                            if let Some(index) =
+                                                graph.list_index_for_commit_index(commit_index)
+                                            {
+                                                graph.select_list_index(index, cx);
+                                            }
+                                        })
+                                        .ok();
+                                })
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(
+                                            Label::new(title)
+                                                .size(LabelSize::Small)
+                                                .truncate(),
+                                        ),
+                                )
+                                .child(
+                                    Label::new(author)
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted)
+                                        .truncate(),
+                                )
+                                .child(
+                                    Label::new(sha)
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                )
+                                .into_any_element()
+                        })
+                        .collect()
+                },
+            )
+            .with_sizing_behavior(ListSizingBehavior::Auto)
+            .flex_grow(1.0)
+            .track_scroll(&self.search_results_scroll);
+            container = container.child(results);
+        } else {
+            container = container.child(list);
+        }
 
         if !self.all_commits_loaded && !self.commits.is_empty() {
             let view_load = cx.weak_entity();
