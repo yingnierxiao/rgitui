@@ -1290,13 +1290,13 @@ mod tests {
         ]);
         let (included, excluded) = build_commit_selection(&rows, &overrides);
         assert!(included.iter().any(|f| {
-            f.path == Path::new("new.rs") && f.contents == CommitFileContents::WorkingTree
+            f.path.as_path() == Path::new("new.rs") && f.contents == CommitFileContents::WorkingTree
         }));
         assert!(included.iter().any(|f| {
-            f.path == Path::new("old.rs") && f.contents == CommitFileContents::WorkingTree
+            f.path.as_path() == Path::new("old.rs") && f.contents == CommitFileContents::WorkingTree
         }));
-        assert!(included.iter().any(|f| f.path == Path::new("partial.rs")));
-        assert!(!included.iter().any(|f| f.path == Path::new("staged.rs")));
+        assert!(included.iter().any(|f| f.path.as_path() == Path::new("partial.rs")));
+        assert!(!included.iter().any(|f| f.path.as_path() == Path::new("staged.rs")));
         assert!(excluded.contains(&PathBuf::from("skipped.rs")));
         assert!(excluded.contains(&PathBuf::from("staged.rs")));
     }
