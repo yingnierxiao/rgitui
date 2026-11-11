@@ -1335,112 +1335,155 @@ impl Render for ChangesPanel {
 
             if let Some(row) = row {
                 let mut menu = ContextMenu::new().min_width(CHANGE_CONTEXT_MENU_WIDTH);
+
                 if row.has_conflict() {
                     let sidebar = weak_sidebar.clone();
                     let panel = weak_panel.clone();
                     let path = row.path.to_string_lossy().to_string();
-                    menu = menu.item(ContextMenuItem::new(t!("changes.menu.open_conflict")).on_click(
-                        move |_, _, cx| {
-                            panel.update(cx, |this, cx| {
-                                this.context_menu = None;
-                                cx.notify();
-                            }).ok();
-                            sidebar.update(cx, |_, cx| {
-                                cx.emit(SidebarEvent::ConflictFileSelected(path.clone()));
-                            }).ok();
-                        },
-                    ));
+                    menu = menu.item(
+                        ContextMenuItem::new(t!("changes.menu.open_conflict")).on_click(
+                            move |_, _, cx| {
+                                panel
+                                    .update(cx, |this, cx| {
+                                        this.context_menu = None;
+                                        cx.notify();
+                                    })
+                                    .ok();
+                                sidebar
+                                    .update(cx, |_, cx| {
+                                        cx.emit(SidebarEvent::ConflictFileSelected(path.clone()));
+                                    })
+                                    .ok();
+                            },
+                        ),
+                    );
                 } else {
                     let open_event = row.selected_event();
                     let sidebar = weak_sidebar.clone();
                     let panel = weak_panel.clone();
-                    menu = menu.item(ContextMenuItem::new(t!("changes.menu.open_diff")).on_click(
-                        move |_, _, cx| {
-                            panel.update(cx, |this, cx| {
-                                this.context_menu = None;
-                                cx.notify();
-                            }).ok();
-                            sidebar.update(cx, |_, cx| cx.emit(open_event.clone())).ok();
-                        },
-                    ));
+                    menu = menu.item(
+                        ContextMenuItem::new(t!("changes.menu.open_diff")).on_click(
+                            move |_, _, cx| {
+                                panel
+                                    .update(cx, |this, cx| {
+                                        this.context_menu = None;
+                                        cx.notify();
+                                    })
+                                    .ok();
+                                sidebar
+                                    .update(cx, |_, cx| cx.emit(open_event.clone()))
+                                    .ok();
+                            },
+                        ),
+                    );
 
                     if let Some(staged_event) = row.staged_preview_event() {
-                        menu = menu.item(ContextMenuItem::new(t!("changes.menu.staged_diff")).on_click(
-                            move |_, _, cx| {
-                                weak_panel.update(cx, |this, cx| {
-                                    this.context_menu = None;
-                                    cx.notify();
-                                }).ok();
-                                weak_sidebar.update(cx, |_, cx| {
-                                    cx.emit(staged_event.clone());
-                                }).ok();
-                            },
-                        ));
+                        let panel = weak_panel.clone();
+                        let sidebar = weak_sidebar.clone();
+                        menu = menu.item(
+                            ContextMenuItem::new(t!("changes.menu.staged_diff")).on_click(
+                                move |_, _, cx| {
+                                    panel
+                                        .update(cx, |this, cx| {
+                                            this.context_menu = None;
+                                            cx.notify();
+                                        })
+                                        .ok();
+                                    sidebar
+                                        .update(cx, |_, cx| cx.emit(staged_event.clone()))
+                                        .ok();
+                                },
+                            ),
+                        );
                     }
 
                     if row.unstaged.is_some() {
                         let sidebar = weak_sidebar.clone();
                         let panel = weak_panel.clone();
                         let path = row.path.to_string_lossy().to_string();
-                        menu = menu.separator().item(ContextMenuItem::new(t!("changes.menu.stage")).on_click(
-                            move |_, _, cx| {
-                                panel.update(cx, |this, cx| {
-                                    this.context_menu = None;
-                                    cx.notify();
-                                }).ok();
-                                sidebar.update(cx, |_, cx| {
-                                    cx.emit(SidebarEvent::StageFile(path.clone()));
-                                }).ok();
-                            },
-                        ));
+                        menu = menu.separator().item(
+                            ContextMenuItem::new(t!("changes.menu.stage")).on_click(
+                                move |_, _, cx| {
+                                    panel
+                                        .update(cx, |this, cx| {
+                                            this.context_menu = None;
+                                            cx.notify();
+                                        })
+                                        .ok();
+                                    sidebar
+                                        .update(cx, |_, cx| {
+                                            cx.emit(SidebarEvent::StageFile(path.clone()));
+                                        })
+                                        .ok();
+                                },
+                            ),
+                        );
                     }
 
                     if row.staged.is_some() {
                         let sidebar = weak_sidebar.clone();
                         let panel = weak_panel.clone();
                         let path = row.path.to_string_lossy().to_string();
-                        menu = menu.item(ContextMenuItem::new(t!("changes.menu.unstage")).on_click(
-                            move |_, _, cx| {
-                                panel.update(cx, |this, cx| {
-                                    this.context_menu = None;
-                                    cx.notify();
-                                }).ok();
-                                sidebar.update(cx, |_, cx| {
-                                    cx.emit(SidebarEvent::UnstageFile(path.clone()));
-                                }).ok();
-                            },
-                        ));
+                        menu = menu.item(
+                            ContextMenuItem::new(t!("changes.menu.unstage")).on_click(
+                                move |_, _, cx| {
+                                    panel
+                                        .update(cx, |this, cx| {
+                                            this.context_menu = None;
+                                            cx.notify();
+                                        })
+                                        .ok();
+                                    sidebar
+                                        .update(cx, |_, cx| {
+                                            cx.emit(SidebarEvent::UnstageFile(path.clone()));
+                                        })
+                                        .ok();
+                                },
+                            ),
+                        );
                     }
 
                     if row.unstaged.is_some() {
                         let sidebar = weak_sidebar.clone();
                         let panel = weak_panel.clone();
                         let path = row.path.to_string_lossy().to_string();
-                        menu = menu.separator().item(ContextMenuItem::new(t!("changes.menu.discard")).on_click(
-                            move |_, _, cx| {
-                                panel.update(cx, |this, cx| {
-                                    this.context_menu = None;
-                                    cx.notify();
-                                }).ok();
-                                sidebar.update(cx, |_, cx| {
-                                    cx.emit(SidebarEvent::DiscardFile(path.clone()));
-                                }).ok();
-                            },
-                        ));
+                        menu = menu.separator().item(
+                            ContextMenuItem::new(t!("changes.menu.discard")).on_click(
+                                move |_, _, cx| {
+                                    panel
+                                        .update(cx, |this, cx| {
+                                            this.context_menu = None;
+                                            cx.notify();
+                                        })
+                                        .ok();
+                                    sidebar
+                                        .update(cx, |_, cx| {
+                                            cx.emit(SidebarEvent::DiscardFile(path.clone()));
+                                        })
+                                        .ok();
+                                },
+                            ),
+                        );
                     }
                 }
 
                 let copy_path = menu_state.path.to_string_lossy().to_string();
                 let panel = weak_panel.clone();
-                menu = menu.separator().item(ContextMenuItem::new(t!("changes.menu.copy_path")).on_click(
-                    move |_, _, cx| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_path.clone()));
-                        panel.update(cx, |this, cx| {
-                            this.context_menu = None;
-                            cx.notify();
-                        }).ok();
-                    },
-                ));
+                menu = menu.separator().item(
+                    ContextMenuItem::new(t!("changes.menu.copy_path")).on_click(
+                        move |_, _, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                copy_path.clone(),
+                            ));
+                            panel
+                                .update(cx, |this, cx| {
+                                    this.context_menu = None;
+                                    cx.notify();
+                                })
+                                .ok();
+                        },
+                    ),
+                );
 
                 let menu_overlay = div()
                     .id("changes-file-context-menu")
