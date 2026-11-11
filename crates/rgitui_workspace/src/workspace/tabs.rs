@@ -76,10 +76,11 @@ impl Workspace {
         let selection_commit_panel = commit_panel.clone();
         cx.subscribe(
             &changes_panel,
-            move |_, _, event: &crate::ChangesPanelEvent, cx| {
+            move |this, _, event: &crate::ChangesPanelEvent, cx| {
                 let crate::ChangesPanelEvent::SelectionChanged(count) = event;
                 selection_commit_panel
                     .update(cx, |panel, cx| panel.set_staged_count(*count, cx));
+                this.update_command_context(cx);
             },
         )
         .detach();
@@ -277,7 +278,7 @@ impl Workspace {
             proj.has_changes(),
             proj.repo_state(),
             !proj.stashes().is_empty(),
-            !proj.status().staged.is_empty(),
+            tab.changes_panel.read(cx).selected_commit_count() > 0,
             has_token,
         )
         .with_multi_commit_selection(tab.graph.read(cx).selected_commit_count() > 1)
