@@ -336,6 +336,9 @@ pub enum GitProjectEvent {
     /// Subscribers should refresh their repository-derived snapshots once.
     RepositoryChanged,
     StatusChanged,
+    /// Deferred diff line counts are ready for visible rows or the full list.
+    /// Consumers update file counters only; no graph/history reload.
+    LineStatsUpdated,
     HeadChanged,
     RefsChanged,
     /// Emitted after ahead/behind for all branches has been recomputed in the background.
