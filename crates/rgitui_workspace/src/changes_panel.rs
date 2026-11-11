@@ -838,7 +838,6 @@ impl Render for ChangesPanel {
                         let weak_panel_toggle = panel.clone();
                         let sidebar_preview = sidebar.clone();
                         let weak_panel = panel.clone();
-                        let path_selected = row.path.clone();
                         let path_tooltip = file_path.clone();
                         let row_bg = row_colors.ghost_element_selected;
                         let row_hover = row_colors.ghost_element_hover;
@@ -1154,13 +1153,25 @@ mod tests {
         let (selection, _) =
             selection_after_click(&rows, &visible, &HashSet::new(), None, 0, false, false);
         let (selection, _) = selection_after_click(
-            &rows, &visible, &selection, Some(Path::new("a.rs")), 2, false, true,
+            &rows,
+            &visible,
+            &selection,
+            Some(Path::new("a.rs")),
+            2,
+            false,
+            true,
         );
         assert_eq!(selection.len(), 2);
         assert!(selection.contains(Path::new("a.rs")));
         assert!(selection.contains(Path::new("c.rs")));
         let (selection, _) = selection_after_click(
-            &rows, &visible, &selection, Some(Path::new("c.rs")), 0, false, true,
+            &rows,
+            &visible,
+            &selection,
+            Some(Path::new("c.rs")),
+            0,
+            false,
+            true,
         );
         assert_eq!(selection.len(), 1);
         assert!(selection.contains(Path::new("c.rs")));
@@ -1178,7 +1189,13 @@ mod tests {
         );
         let visible = vec![2, 0];
         let (selection, _) = selection_after_click(
-            &rows, &visible, &HashSet::new(), Some(Path::new("z.rs")), 1, true, false,
+            &rows,
+            &visible,
+            &HashSet::new(),
+            Some(Path::new("z.rs")),
+            1,
+            true,
+            false,
         );
         assert_eq!(selection.len(), 2);
         assert!(!selection.contains(Path::new("hidden.rs")));
@@ -1189,7 +1206,10 @@ mod tests {
     #[test]
     fn selected_checkbox_batches_stage_and_unstage_once() {
         let rows = combine_changes(
-            vec![file("staged.rs", FileChangeKind::Modified)],
+            vec![
+                file("fully-staged.rs", FileChangeKind::Modified),
+                file("staged.rs", FileChangeKind::Modified),
+            ],
             vec![
                 file("a.rs", FileChangeKind::Modified),
                 file("b.rs", FileChangeKind::Modified),
@@ -1203,17 +1223,52 @@ mod tests {
         let pending = HashMap::from([(PathBuf::from("b.rs"), CheckState::Checked)]);
         assert_eq!(
             selected_staging_action(
-                &rows, &visible, &selected, &pending, CheckState::Checked,
+                &rows,
+                &visible,
+                &selected,
+                &pending,
+                CheckState::Checked,
             ),
             Some(SidebarEvent::StageFiles(vec![
-                "a.rs".into(), "partial.rs".into(), "staged.rs".into(),
+                "a.rs".into(),
+                "partial.rs".into(),
+                "staged.rs".into(),
             ]))
         );
         assert_eq!(
             selected_staging_action(
-                &rows, &visible, &selected, &pending, CheckState::Unchecked,
+                &rows,
+                &visible,
+                &selected,
+                &pending,
+                CheckState::Unchecked,
             ),
-            Some(SidebarEvent::UnstageFiles(vec!["staged.rs".into()]))
+            Some(SidebarEvent::UnstageFiles(vec![
+                "fully-staged.rs".into(),
+                "staged.rs".into(),
+            ]))
+        );
+    }
+
+    #[test]
+    fn group_action_never_touches_hidden_selected_paths() {
+        let rows = combine_changes(
+            vec![],
+            vec![
+                file("hidden.rs", FileChangeKind::Modified),
+                file("visible.rs", FileChangeKind::Modified),
+            ],
+        );
+        let selected: HashSet<PathBuf> = rows.iter().map(|row| row.path.clone()).collect();
+        assert_eq!(
+            selected_staging_action(
+                &rows,
+                &[1],
+                &selected,
+                &HashMap::new(),
+                CheckState::Checked,
+            ),
+            Some(SidebarEvent::StageFiles(vec!["visible.rs".into()]))
         );
     }
 
