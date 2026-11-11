@@ -632,6 +632,17 @@ fn contains_case_insensitive(haystack: &str, lowercase_needle: &str) -> bool {
     haystack.to_lowercase().contains(lowercase_needle)
 }
 
+/// Case-insensitive search used by the commit-history filter. Filtering
+/// operates entirely on the loaded CommitInfo snapshot; it never scans Git
+/// for each keypress.
+fn commit_matches_query(commit: &CommitInfo, query_lowercase: &str) -> bool {
+    contains_case_insensitive(&commit.summary, query_lowercase)
+        || contains_case_insensitive(&commit.message, query_lowercase)
+        || contains_case_insensitive(&commit.author.name, query_lowercase)
+        || contains_case_insensitive(&commit.author.email, query_lowercase)
+        || contains_case_insensitive(&commit.short_id, query_lowercase)
+}
+
 /// Lay out dirty worktree pseudo-nodes relative to the already-computed commit
 /// graph.
 ///
@@ -1889,12 +1900,7 @@ impl GraphView {
         let query = self.search_editor.read(cx).text().to_lowercase();
         let mut match_set = HashSet::new();
         for (i, commit) in self.commits.iter().enumerate() {
-            if contains_case_insensitive(&commit.summary, &query)
-                || contains_case_insensitive(&commit.message, &query)
-                || contains_case_insensitive(&commit.author.name, &query)
-                || contains_case_insensitive(&commit.author.email, &query)
-                || contains_case_insensitive(&commit.short_id, &query)
-            {
+            if commit_matches_query(commit, &query) {
                 self.filter_matches.push(i);
                 match_set.insert(i);
             }
@@ -5098,6 +5104,42 @@ mod tests {
     #[test]
     fn case_insensitive_search_preserves_unicode_behavior() {
         assert!(contains_case_insensitive("CAFÉ", "café"));
+    }
+
+    #[test]
+    fn history_filter_matches_author_title_and_email_case_insensitively() {
+        let mut commit = make_commit(8, &[], Vec::new());
+        commit.summary = "修复 登录 逻辑".into();
+        commit.message = "修复 登录 逻辑\n\nMore details".into();
+        commit.author.name = "Li Jun".into();
+        commit.author.email = "lijun@studio.example".into();
+
+        assert!(commit_matches_query(&commit, "li jun"));
+        assert!(commit_matches_query(&commit, "lijun@"));
+        assert!(commit_matches_query(&commit, "登录"));
+        assert!(commit_matches_query(&commit, "more details"));
+        assert!(commit_matches_query(&commit, &commit.short_id));
+        assert!(!commit_matches_query(&commit, "another author"));
+    }
+
+    #[test]
+    fn history_filter_preserves_commit_order() {
+        let mut commits = vec![
+            make_commit(3, &[], Vec::new()),
+            make_commit(2, &[], Vec::new()),
+            make_commit(1, &[], Vec::new()),
+        ];
+        commits[0].author.name = "Alice".into();
+        commits[1].author.name = "Bob".into();
+        commits[2].summary = "Alice fixes crash".into();
+        let indices = commits
+            .iter()
+            .enumerate()
+            .filter_map(|(index, commit)| {
+                commit_matches_query(commit, "alice").then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(indices, vec![0, 2]);
     }
 
     // --- format_relative_time ---
