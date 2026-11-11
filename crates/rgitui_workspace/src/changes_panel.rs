@@ -85,16 +85,6 @@ impl ChangeRow {
         }
     }
 
-    fn toggle_event(&self) -> SidebarEvent {
-        let path = self.path.to_string_lossy().to_string();
-        if self.unstaged.is_some() {
-            // Unchecked and partially staged files become fully staged.
-            SidebarEvent::StageFile(path)
-        } else {
-            SidebarEvent::UnstageFile(path)
-        }
-    }
-
     fn has_conflict(&self) -> bool {
         self.staged
             .iter()
@@ -138,60 +128,6 @@ fn combine_changes(staged: Vec<FileStatus>, unstaged: Vec<FileStatus>) -> Vec<Ch
 
     rows.sort_unstable_by(|left, right| left.path.cmp(&right.path));
     rows
-}
-
-/// Determine header state and its action from *visible*, non-conflicted rows.
-/// If a filter hides files, the action is restricted to visible paths.
-fn bulk_toggle_for_visible(
-    rows: &[ChangeRow],
-    visible: &[usize],
-) -> (CheckState, Option<SidebarEvent>) {
-    let selectable = visible
-        .iter()
-        .filter_map(|&index| rows.get(index))
-        .filter(|row| !row.has_conflict())
-        .collect::<Vec<_>>();
-    if selectable.is_empty() {
-        return (CheckState::Unchecked, None);
-    }
-    let all_checked = selectable
-        .iter()
-        .all(|row| row.state() == CheckState::Checked);
-    let any_checked = selectable.iter().any(|row| row.staged.is_some());
-    let state = if all_checked {
-        CheckState::Checked
-    } else if any_checked {
-        CheckState::Indeterminate
-    } else {
-        CheckState::Unchecked
-    };
-
-    // Conflict rows are never valid toggle targets. Even with no text
-    // filter, a bulk operation must not implicitly reset those index entries.
-    let restricted = visible.len() != rows.len() || selectable.len() != rows.len();
-    let action = if !restricted {
-        if all_checked {
-            SidebarEvent::UnstageAll
-        } else {
-            SidebarEvent::StageAll
-        }
-    } else if all_checked {
-        SidebarEvent::UnstageFiles(
-            selectable
-                .iter()
-                .map(|row| row.path.to_string_lossy().to_string())
-                .collect(),
-        )
-    } else {
-        SidebarEvent::StageFiles(
-            selectable
-                .iter()
-                .filter(|row| row.unstaged.is_some())
-                .map(|row| row.path.to_string_lossy().to_string())
-                .collect(),
-        )
-    };
-    (state, Some(action))
 }
 
 fn change_color(kind: FileChangeKind) -> Color {
@@ -370,7 +306,7 @@ pub struct ChangesPanel {
     staged_count: usize,
     commit_in_progress: bool,
     header_state: CheckState,
-    header_action: Option<SidebarEvent>,
+    header_enabled: bool,
     filter: String,
     kind_filter: ChangeKindFilter,
     only_staged: bool,
@@ -413,7 +349,7 @@ impl ChangesPanel {
             staged_count: 0,
             commit_in_progress: false,
             header_state: CheckState::Unchecked,
-            header_action: None,
+            header_enabled: false,
             filter: String::new(),
             kind_filter: ChangeKindFilter::All,
             only_staged: false,
@@ -556,9 +492,10 @@ impl ChangesPanel {
                     .then_with(|| left_row.path.cmp(&right_row.path))
             });
         }
-        let (_state, action) = bulk_toggle_for_visible(&self.rows, &visible);
         self.header_state = visual_header_state(&self.rows, &visible, &self.overrides);
-        self.header_action = action;
+        self.header_enabled = visible
+            .iter()
+            .any(|index| !self.rows[*index].has_conflict());
         if !self.selected_paths.is_empty() {
             let visible_paths: HashSet<&Path> = visible
                 .iter()
@@ -861,7 +798,7 @@ impl Render for ChangesPanel {
         let show_line_stats = cx.global::<SettingsState>().settings().show_change_line_stats;
         let staged_count = self.staged_count;
         let header_state = self.header_state;
-        let has_selectable_rows = self.header_action.is_some() && !self.commit_in_progress;
+        let has_selectable_rows = self.header_enabled && !self.commit_in_progress;
         let is_committing = self.commit_in_progress;
         let panel_header = panel.clone();
         let file_count = rows.len();
@@ -1326,53 +1263,28 @@ mod tests {
     }
 
     #[test]
-    fn filtering_bulk_selection_does_not_stage_hidden_paths() {
-        let rows = combine_changes(
-            vec![file("already.rs", FileChangeKind::Modified)],
-            vec![
-                file("visible.rs", FileChangeKind::Modified),
-                file("hidden.rs", FileChangeKind::Modified),
-            ],
-        );
-        let visible = rows
-            .iter()
-            .position(|row| row.path == PathBuf::from("visible.rs"))
-            .unwrap();
-        let (state, action) = bulk_toggle_for_visible(&rows, &[visible]);
-        assert_eq!(state, CheckState::Unchecked);
-        assert_eq!(action, Some(SidebarEvent::StageFiles(vec!["visible.rs".into()])));
-    }
-
-    #[test]
-    fn filtered_bulk_unstage_is_limited_to_visible_staged_files() {
-        let rows = combine_changes(
-            vec![
-                file("a.rs", FileChangeKind::Modified),
-                file("b.rs", FileChangeKind::Modified),
-            ],
-            vec![],
-        );
-        let (state, action) = bulk_toggle_for_visible(&rows, &[1]);
-        assert_eq!(state, CheckState::Checked);
-        assert_eq!(action, Some(SidebarEvent::UnstageFiles(vec!["b.rs".into()])));
-    }
-
-    #[test]
-    fn bulk_toggle_skips_conflicts_and_disables_conflict_only_lists() {
+    fn virtual_header_respects_visible_rows_and_ignores_conflicts() {
         let rows = combine_changes(
             vec![],
             vec![
                 file("conflict.rs", FileChangeKind::Conflicted),
-                file("normal.rs", FileChangeKind::Modified),
+                file("hidden.rs", FileChangeKind::Modified),
+                file("visible.rs", FileChangeKind::Modified),
             ],
         );
+        let mut overrides = HashMap::new();
+        overrides.insert(PathBuf::from("visible.rs"), CheckState::Checked);
         assert_eq!(
-            bulk_toggle_for_visible(&rows, &[0]),
-            (CheckState::Unchecked, None)
+            visual_header_state(&rows, &[2], &overrides),
+            CheckState::Checked
         );
         assert_eq!(
-            bulk_toggle_for_visible(&rows, &[0, 1]).1,
-            Some(SidebarEvent::StageFiles(vec!["normal.rs".into()]))
+            visual_header_state(&rows, &[0], &overrides),
+            CheckState::Unchecked
+        );
+        assert_eq!(
+            visual_header_state(&rows, &[0, 1, 2], &overrides),
+            CheckState::Indeterminate
         );
     }
 
@@ -1389,10 +1301,6 @@ mod tests {
         assert_eq!(rows[0].path, PathBuf::from("a.rs"));
         assert_eq!(rows[0].state(), CheckState::Unchecked);
         assert_eq!(rows[1].state(), CheckState::Indeterminate);
-        assert_eq!(
-            rows[1].toggle_event(),
-            SidebarEvent::StageFile("z.rs".into())
-        );
     }
 
     #[test]
@@ -1421,10 +1329,6 @@ mod tests {
     fn checkbox_unstages_only_fully_staged_files() {
         let rows = combine_changes(vec![file("x.rs", FileChangeKind::Added)], vec![]);
         assert_eq!(rows[0].state(), CheckState::Checked);
-        assert_eq!(
-            rows[0].toggle_event(),
-            SidebarEvent::UnstageFile("x.rs".into())
-        );
     }
 
     #[test]
