@@ -1,4 +1,10 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// Release builds normally use the Windows GUI subsystem and have no
+// console stderr for Tee-Object to capture. Opt in to a console-enabled
+// release binary with `cargo build --release -p rgitui --features console-logs`.
+#![cfg_attr(
+    all(not(debug_assertions), not(feature = "console-logs")),
+    windows_subsystem = "windows"
+)]
 
 // Allocation-site heap profiling, enabled by `--features perf-dhat`. It has to
 // be declared in the binary because a global allocator cannot come from a
