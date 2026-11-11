@@ -211,7 +211,7 @@ impl Render for Workspace {
                 "workspace: taking initial focus (was {:?})",
                 window.focused(cx)
             );
-            self.focus_panel(FocusedPanel::Graph, window, cx);
+            self.focus_panel(FocusedPanel::ChangesPanel, window, cx);
         }
 
         // A hidden graph is not in the element tree, so focus left inside it,
@@ -221,11 +221,13 @@ impl Render for Workspace {
         // rather than where the graph is hidden because the command palette
         // hides it without a `Window`, and containment is resolved against the
         // previous frame: the last one in which the graph was there to hold it.
-        if self.layout.graph_hidden
-            && self
-                .tabs
-                .get(self.active_tab)
-                .is_some_and(|tab| tab.graph.read(cx).contains_focus(window, cx))
+        if self
+            .tabs
+            .get(self.active_tab)
+            .is_some_and(|tab| {
+                tab.right_panel_mode != RightPanelMode::History
+                    && tab.graph.read(cx).contains_focus(window, cx)
+            })
         {
             self.focus_panel(FocusedPanel::DiffViewer, window, cx);
         }
@@ -405,8 +407,6 @@ impl Render for Workspace {
         let diff_focused = active_tab.bottom_panel_focused(window, cx);
         let focus_accent = colors.border_focused;
         let bottom_panel_mode = active_tab.bottom_panel_mode;
-        let graph_hidden = self.layout.graph_hidden;
-        let diff_viewer_height = self.layout.diff_viewer_height;
         let current_view_key = active_tab.current_view_cache_key(cx);
         let (history_availability, blame_availability) = current_view_key
             .as_ref()
@@ -985,47 +985,6 @@ impl Render for Workspace {
                                         ),
                                 )
                             })
-                            // Graph view and the drag-to-resize strip below it,
-                            // both gone while the graph is hidden
-                            .when(!graph_hidden, |el| {
-                                el.child(
-                                    div()
-                                        .flex_1()
-                                        .min_h(px(MIN_GRAPH_HEIGHT))
-                                        .when(graph_focused, |el| {
-                                            el.border_t_2().border_color(focus_accent)
-                                        })
-                                        .child(active_tab.graph.clone().cached(fill_container())),
-                                )
-                                .child(
-                                    div()
-                                        .id("diff-resize-handle")
-                                        .w_full()
-                                        .h(px(3.))
-                                        .flex_shrink_0()
-                                        .border_t_1()
-                                        .border_color(colors.border_variant)
-                                        .when(!overlays_active, |el| {
-                                            el.cursor_row_resize()
-                                                .hover(|s| {
-                                                    s.bg(gpui::Hsla {
-                                                        a: 0.6,
-                                                        ..colors.border_focused
-                                                    })
-                                                })
-                                                .on_drag(DiffViewerResize, |val, _, _, cx| {
-                                                    cx.stop_propagation();
-                                                    cx.new(|_| val.clone())
-                                                })
-                                                .on_mouse_down(
-                                                    MouseButton::Left,
-                                                    |_: &MouseDownEvent, _, cx| {
-                                                        cx.stop_propagation();
-                                                    },
-                                                )
-                                        }),
-                                )
-                            })
                             // Bottom panel tabs + content
                             .child({
                                 let tab_bar_bg = colors.toolbar_background;
@@ -1097,36 +1056,6 @@ impl Render for Workspace {
                                         t!("workspace.bottom.blame_unavailable")
                                     }
                                 };
-
-                                // This bar stays on screen whichever way the
-                                // graph is toggled, so the one control for both
-                                // directions lives here rather than on the graph.
-                                let graph_toggle = div().h_full().flex().items_center().child(
-                                    IconButton::new(
-                                        "toggle-commit-graph",
-                                        if graph_hidden {
-                                            IconName::ChevronDown
-                                        } else {
-                                            IconName::ChevronUp
-                                        },
-                                    )
-                                    .size(ButtonSize::Compact)
-                                    .color(Color::Muted)
-                                    .tooltip_fn(keymap::command_tooltip(
-                                        if graph_hidden {
-                                            t!("workspace.graph.show.tooltip")
-                                        } else {
-                                            t!("workspace.graph.hide.tooltip")
-                                        },
-                                        CommandId::ToggleGraph,
-                                    ))
-                                    .on_click(cx.listener(
-                                        |this, _: &ClickEvent, _, cx| {
-                                            cx.stop_propagation();
-                                            this.execute_command(CommandId::ToggleGraph, cx);
-                                        },
-                                    )),
-                                );
 
                                 let ws = cx.entity().downgrade();
                                 let ws2 = cx.entity().downgrade();
@@ -1246,26 +1175,15 @@ impl Render for Workspace {
                                             },
                                         ),
                                     )
-                                    .child(div().flex_1())
-                                    .child(graph_toggle);
+                                    .child(div().flex_1());
 
                                 div()
                                     .v_flex()
-                                    // Hidden graph: take the whole column. Otherwise
-                                    // the stored height is a preference the panel
-                                    // shrinks from when the column is too short, down
-                                    // to its own minimum, while the graph's minimum
-                                    // holds its ground above it. The layout engine
-                                    // resolves that every frame, so a window resize
-                                    // is reflected in the same frame it happens.
-                                    .map(|el| {
-                                        if graph_hidden {
-                                            el.flex_1().min_h_0()
-                                        } else {
-                                            el.h(px(diff_viewer_height))
-                                                .min_h(px(MIN_DIFF_VIEWER_HEIGHT))
-                                        }
-                                    })
+                                    // The diff (or auxiliary view) owns the
+                                    // entire center height; history is a
+                                    // separate right-panel tab.
+                                    .flex_1()
+                                    .min_h_0()
                                     .when(diff_focused, |el| {
                                         el.border_t_2().border_color(focus_accent)
                                     })
@@ -1331,10 +1249,12 @@ impl Render for Workspace {
                                 .absolute()
                                 .size_full(),
                             )
-                            // Right panel tab bar (Details / Issues / PRs)
+                            // Right panel tabs (Changes / History / Issues / PRs)
                             .child({
                                 let is_details =
                                     active_tab.right_panel_mode == RightPanelMode::Details;
+                                let is_history =
+                                    active_tab.right_panel_mode == RightPanelMode::History;
                                 let is_issues =
                                     active_tab.right_panel_mode == RightPanelMode::Issues;
                                 let is_prs =
@@ -1342,6 +1262,7 @@ impl Render for Workspace {
                                 let is_bh =
                                     active_tab.right_panel_mode == RightPanelMode::BranchHealth;
                                 let ws_details = cx.entity().downgrade();
+                                let ws_history = cx.entity().downgrade();
                                 let ws_issues = cx.entity().downgrade();
                                 let ws_prs = cx.entity().downgrade();
                                 let ws_bh = cx.entity().downgrade();
@@ -1367,13 +1288,7 @@ impl Render for Workspace {
                                             .on_click(move |_: &ClickEvent, _, cx| {
                                                 ws_details
                                                     .update(cx, |ws, cx| {
-                                                        if let Some(tab) =
-                                                            ws.tabs.get_mut(ws.active_tab)
-                                                        {
-                                                            tab.right_panel_mode =
-                                                                RightPanelMode::Details;
-                                                            cx.notify();
-                                                        }
+                                                        ws.set_graph_hidden(true, cx);
                                                     })
                                                     .ok();
                                             })
@@ -1382,6 +1297,36 @@ impl Render for Workspace {
                                                     .size(LabelSize::XSmall)
                                                     .weight(gpui::FontWeight::SEMIBOLD)
                                                     .color(if is_details {
+                                                        Color::Default
+                                                    } else {
+                                                        Color::Muted
+                                                    }),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("right-tab-history")
+                                            .h_flex()
+                                            .h_full()
+                                            .px(px(10.))
+                                            .items_center()
+                                            .cursor_pointer()
+                                            .when(is_history, |el| {
+                                                el.border_b_2().border_color(colors.text_accent)
+                                            })
+                                            .hover(|s| s.bg(colors.ghost_element_hover))
+                                            .on_click(move |_: &ClickEvent, _, cx| {
+                                                ws_history
+                                                    .update(cx, |ws, cx| {
+                                                        ws.set_graph_hidden(false, cx);
+                                                    })
+                                                    .ok();
+                                            })
+                                            .child(
+                                                Label::new(t!("workspace.bottom.history"))
+                                                    .size(LabelSize::XSmall)
+                                                    .weight(gpui::FontWeight::SEMIBOLD)
+                                                    .color(if is_history {
                                                         Color::Default
                                                     } else {
                                                         Color::Muted
@@ -1520,7 +1465,7 @@ impl Render for Workspace {
                                     .flex_1()
                                     .min_h_0()
                                     .overflow_hidden()
-                                    .when(detail_focused, |el| {
+                                    .when(detail_focused || (is_history && graph_focused), |el| {
                                         el.border_t_2().border_color(focus_accent)
                                     })
                                     .when(
@@ -1529,6 +1474,17 @@ impl Render for Workspace {
                                             el.child(
                                                 active_tab
                                                     .changes_panel
+                                                    .clone()
+                                                    .cached(fill_container()),
+                                            )
+                                        },
+                                    )
+                                    .when(
+                                        active_tab.right_panel_mode == RightPanelMode::History,
+                                        |el| {
+                                            el.child(
+                                                active_tab
+                                                    .graph
                                                     .clone()
                                                     .cached(fill_container()),
                                             )
@@ -1552,7 +1508,7 @@ impl Render for Workspace {
                                     ),
                             )
                             // Resize handle between detail and commit input
-                            .when(!commit_panel_collapsed, |el| {
+                            .when(is_details && !commit_panel_collapsed, |el| {
                                 el.child(
                                     div()
                                         .id("commit-input-resize-handle")
@@ -1583,11 +1539,13 @@ impl Render for Workspace {
                                 )
                             })
                             // Commit panel at bottom
-                            .child(
-                                div().h(px(commit_input_height)).flex_shrink_0().child(
-                                    active_tab.commit_panel.clone().cached(fill_container()),
-                                ),
-                            )
+                            .when(is_details, |el| {
+                                el.child(
+                                    div().h(px(commit_input_height)).flex_shrink_0().child(
+                                        active_tab.commit_panel.clone().cached(fill_container()),
+                                    ),
+                                )
+                            })
                             // Width resize handle on left edge
                             .child(
                                 div()
