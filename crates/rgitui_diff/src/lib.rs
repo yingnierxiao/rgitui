@@ -3693,7 +3693,7 @@ impl Render for DiffViewer {
                     div()
                         .h_flex()
                         .h(px(28.))
-                        .px_3()
+                        .px(px(12.))
                         .items_center()
                         .bg(colors.toolbar_background)
                         .child(
@@ -3709,7 +3709,7 @@ impl Render for DiffViewer {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .p_4()
+                        .p(px(16.))
                         .child(
                             Label::new(t!("diff.no_text_changes"))
                                 .size(LabelSize::Small)
