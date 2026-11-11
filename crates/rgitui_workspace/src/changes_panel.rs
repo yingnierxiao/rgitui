@@ -388,7 +388,6 @@ struct ChangesContextMenuState {
 }
 
 const CHANGE_CONTEXT_MENU_WIDTH: f32 = 220.0;
-const CHANGE_CONTEXT_MENU_HEIGHT: f32 = 210.0;
 
 pub struct ChangesPanel {
     sidebar: WeakEntity<Sidebar>,
@@ -1328,9 +1327,31 @@ impl Render for ChangesPanel {
             );
 
         if let Some(menu_state) = self.context_menu.clone() {
+            let row = self.rows.iter().find(|row| row.path == menu_state.path).cloned();
+            let menu_height = row.as_ref().map_or(0.0, |row| {
+                let mut item_count = 2; // Open (or conflict resolver) + copy path.
+                let mut separator_count = 1; // Separator before copy path.
+                if !row.has_conflict() {
+                    if row.staged_preview_event().is_some() {
+                        item_count += 1;
+                    }
+                    if row.unstaged.is_some() {
+                        item_count += 1;
+                        separator_count += 1;
+                    }
+                    if row.staged.is_some() {
+                        item_count += 1;
+                    }
+                    if row.unstaged.is_some() && row.staged.is_none() {
+                        item_count += 1;
+                        separator_count += 1;
+                    }
+                }
+                8.0 + item_count as f32 * 28.0 + separator_count as f32 * 9.0
+            });
             let menu_size = Size::new(
                 px(CHANGE_CONTEXT_MENU_WIDTH),
-                px(CHANGE_CONTEXT_MENU_HEIGHT),
+                px(menu_height),
             );
             let bounds = self.container_bounds;
             let relative_x = menu_state.position.x - bounds.origin.x;
@@ -1341,7 +1362,6 @@ impl Render for ChangesPanel {
             let menu_y = relative_y.max(px(0.)).min(max_y);
             let weak_panel = cx.weak_entity();
             let weak_sidebar = self.sidebar.clone();
-            let row = self.rows.iter().find(|row| row.path == menu_state.path).cloned();
 
             if let Some(row) = row {
                 let mut menu = ContextMenu::new().min_width(CHANGE_CONTEXT_MENU_WIDTH);
