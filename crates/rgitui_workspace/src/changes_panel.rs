@@ -1000,6 +1000,14 @@ impl Render for ChangesPanel {
                             )
                             .child(
                                 div()
+                                    // GPUI's tooltip is available on a
+                                    // stateful (ID-bearing) interactive element.
+                                    // Keep this ID distinct from the file row
+                                    // so hovering the checkbox cannot open it.
+                                    .id(ElementId::NamedInteger(
+                                        "changes-file-tooltip".into(),
+                                        row_number as u64,
+                                    ))
                                     .h_flex()
                                     .flex_1()
                                     .min_w_0()
