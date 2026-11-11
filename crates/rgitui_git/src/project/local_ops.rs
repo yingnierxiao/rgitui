@@ -5948,6 +5948,7 @@ fn count_would_remove(stdout: &str) -> usize {
 mod tests {
     use std::fs;
     use std::io::Write;
+    use std::path::PathBuf;
     use std::process::Stdio;
 
     use rgitui_test_support::TempRepo;
