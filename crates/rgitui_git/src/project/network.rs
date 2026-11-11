@@ -373,7 +373,16 @@ impl GitProject {
                                     // A successful no-op pull without AutoStash cannot
                                     // alter the checked-out files or index. Preserve the
                                     // last validated status snapshot in this narrow case.
-                                    (msg, false, details, pull_can_reuse_status_cache(auto_stash, false, already_up_to_date))
+                                    (
+                                        msg,
+                                        false,
+                                        details,
+                                        pull_can_reuse_status_cache(
+                                            auto_stash,
+                                            false,
+                                            already_up_to_date,
+                                        ),
+                                    )
                                 }
                             }
                             Err(e) => {
