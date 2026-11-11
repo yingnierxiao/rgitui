@@ -1019,6 +1019,8 @@ impl GitProject {
             self.tags.iter().map(|t| (t.oid, t.name.clone())).collect();
         let commit_limit = self.commit_limit;
         let author_filter = self.commit_author_filter.clone();
+        let initial_ref_fingerprint = history_cache::ref_fingerprint(&repo_path).ok();
+        let history_generation = self.commit_history_generation;
 
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let result = cx
@@ -1038,7 +1040,13 @@ impl GitProject {
 
             cx.update(|cx| {
                 this.update(cx, |this, cx| {
-                    if this.commit_query_generation != query_generation {
+                    if this.commit_query_generation != query_generation
+                        || this.commit_history_generation != history_generation
+                    {
+                        this.load_more_in_flight = false;
+                        log::info!(
+                            "load more discarded: a newer history snapshot was applied"
+                        );
                         return Ok(());
                     }
                     this.load_more_in_flight = false;
@@ -1055,6 +1063,29 @@ impl GitProject {
                     }
                     this.commit_offset = this.recent_commits.len();
                     this.has_more_commits = has_more;
+                    this.commit_history_generation =
+                        this.commit_history_generation.wrapping_add(1);
+                    // Pagination replaces the Arc that the weak history cache
+                    // referred to. Re-seed it only if refs did not change while
+                    // git log was running, otherwise the next refresh must
+                    // rebuild the history from current refs.
+                    if initial_ref_fingerprint.is_some()
+                        && history_cache::ref_fingerprint(&this.repo_path).ok()
+                            == initial_ref_fingerprint
+                    {
+                        if let Ok(repo) = Repository::open(&this.repo_path) {
+                            this.refresh_caches.seed_loaded_history(
+                                &repo,
+                                refresh::effective_refresh_commit_limit(
+                                    this.commit_limit,
+                                    this.recent_commits.len(),
+                                ),
+                                this.commit_author_filter.as_deref(),
+                                &this.recent_commits,
+                                this.has_more_commits,
+                            );
+                        }
+                    }
                     cx.emit(GitProjectEvent::StatusChanged);
                     cx.notify();
                     Ok(())

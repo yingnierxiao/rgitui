@@ -480,7 +480,10 @@ impl GitProject {
                             // paged in via "load more" (the gather otherwise replaces
                             // the whole list with just `commit_limit` commits).
                             let effective_limit =
-                                proj.loaded_commit_count().max(watcher_commit_limit);
+                                super::refresh::effective_refresh_commit_limit(
+                                    watcher_commit_limit,
+                                    proj.loaded_commit_count(),
+                                );
                             let mut paths = if watch_all {
                                 proj.worktrees
                                     .iter()

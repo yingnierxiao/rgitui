@@ -184,7 +184,10 @@ impl GitProject {
         let task_remote_name = remote_name.clone();
         let task_worktree_path = worktree_path.to_path_buf();
         let repo_path = self.repo_path.clone();
-        let commit_limit = self.commit_limit;
+        let commit_limit = super::refresh::effective_refresh_commit_limit(
+            self.commit_limit,
+            self.loaded_commit_count(),
+        );
         let operation_id = self.begin_operation(
             GitOperationKind::Fetch,
             msg!("git.fetch.running", remote = &remote_name),
@@ -308,7 +311,10 @@ impl GitProject {
         let task_branch_name = branch_name.clone();
         let task_worktree_path = worktree_path.to_path_buf();
         let repo_path = self.repo_path.clone();
-        let commit_limit = self.commit_limit;
+        let commit_limit = super::refresh::effective_refresh_commit_limit(
+            self.commit_limit,
+            self.loaded_commit_count(),
+        );
         let refresh_caches = self.refresh_caches.clone();
         let author_filter = self.commit_author_filter.clone();
         let operation_id = self.begin_operation(
@@ -560,7 +566,10 @@ impl GitProject {
         let task_remote_branch_name = remote_branch_name.clone();
         let task_worktree_path = worktree_path.to_path_buf();
         let repo_path = self.repo_path.clone();
-        let commit_limit = self.commit_limit;
+        let commit_limit = super::refresh::effective_refresh_commit_limit(
+            self.commit_limit,
+            self.loaded_commit_count(),
+        );
         let kind = GitOperationKind::push(force);
         let operation_id = self.begin_operation(
             kind,

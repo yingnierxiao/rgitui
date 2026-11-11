@@ -21,6 +21,12 @@ pub(super) fn normalize_commit_limit(limit: usize) -> usize {
     limit.clamp(1, MAX_COMMIT_LIMIT)
 }
 
+/// A refresh must not truncate history the user already paged into view.
+/// Network operations and the watcher share the same bounded policy.
+pub(super) fn effective_refresh_commit_limit(configured: usize, loaded: usize) -> usize {
+    normalize_commit_limit(configured.max(loaded))
+}
+
 /// A cached status snapshot is reusable only while its invalidation generation and
 /// line-count setting still match. The generation is advanced by filesystem/Git
 /// watcher events, explicit operations, and worktree inspection changes.
@@ -249,7 +255,20 @@ impl RefreshCaches {
         commits: &Arc<Vec<CommitInfo>>,
         has_more: bool,
     ) {
-        let key = commit_log_key(repo, commit_limit, None);
+        self.seed_loaded_history(repo, commit_limit, None, commits, has_more);
+    }
+
+    /// Reattach the weak cache to a commit list expanded by pagination. Ref
+    /// stability is validated by the caller before re-seeding this cache.
+    pub(super) fn seed_loaded_history(
+        &self,
+        repo: &Repository,
+        commit_limit: usize,
+        author_filter: Option<&str>,
+        commits: &Arc<Vec<CommitInfo>>,
+        has_more: bool,
+    ) {
+        let key = commit_log_key(repo, commit_limit, author_filter);
         self.keep_commit_log(key, commits, has_more);
     }
 }
@@ -1707,6 +1726,27 @@ impl GitProject {
                         }
                         this.commit_offset = this.recent_commits.len();
                         this.has_more_commits = has_more;
+                        this.commit_history_generation =
+                            this.commit_history_generation.wrapping_add(1);
+                        // Reattach the cache to the appended Arc so a subsequent
+                        // Pull/Watcher refresh does not re-run git log.
+                        if cache_fingerprint.is_some()
+                            && super::history_cache::ref_fingerprint(&this.repo_path).ok()
+                                == cache_fingerprint
+                        {
+                            if let Ok(repo) = Repository::open(&this.repo_path) {
+                                this.refresh_caches.seed_loaded_history(
+                                    &repo,
+                                    effective_refresh_commit_limit(
+                                        this.commit_limit,
+                                        this.recent_commits.len(),
+                                    ),
+                                    this.commit_author_filter.as_deref(),
+                                    &this.recent_commits,
+                                    this.has_more_commits,
+                                );
+                            }
+                        }
                         log::info!(
                             "refresh phase 2 applied in {:?}: {} commits total",
                             t.elapsed(),
@@ -2208,6 +2248,16 @@ mod load_more_tests {
         assert_eq!(normalize_commit_limit(0), 1);
         assert_eq!(normalize_commit_limit(42), 42);
         assert_eq!(normalize_commit_limit(usize::MAX), MAX_COMMIT_LIMIT);
+    }
+
+    #[test]
+    fn network_refresh_keeps_already_loaded_history_window() {
+        assert_eq!(effective_refresh_commit_limit(1000, 2000), 2000);
+        assert_eq!(effective_refresh_commit_limit(1000, 100), 1000);
+        assert_eq!(
+            effective_refresh_commit_limit(1000, usize::MAX),
+            MAX_COMMIT_LIMIT
+        );
     }
 }
 
@@ -2976,6 +3026,23 @@ mod commit_log_reuse_tests {
         let refreshed = gather(&repo, &caches, 10);
         assert!(Arc::ptr_eq(&initial.recent_commits, &refreshed.recent_commits));
         assert_eq!(refreshed.status.unstaged.len(), 1);
+    }
+
+    #[test]
+    fn a_paginated_history_cache_can_be_reused_at_its_expanded_limit() {
+        let repo = TempRepo::with_commits(5);
+        let caches = RefreshCaches::default();
+        let snapshot = gather(&repo, &caches, 5);
+        caches.seed_loaded_history(
+            repo.repo(),
+            5,
+            None,
+            &snapshot.recent_commits,
+            snapshot.has_more_commits,
+        );
+
+        let next = gather(&repo, &caches, 5);
+        assert!(Arc::ptr_eq(&snapshot.recent_commits, &next.recent_commits));
     }
 
     #[test]
