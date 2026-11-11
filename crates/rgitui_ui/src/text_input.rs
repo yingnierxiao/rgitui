@@ -713,7 +713,11 @@ impl Render for TextInput {
             let handle = self.focus_handle.clone();
             self.focus_out_subscription =
                 Some(
-                    cx.on_focus_out(&handle, window, |_this, _event, _window, cx| {
+                    cx.on_focus_out(&handle, window, |this, _event, _window, cx| {
+                        // The IME may end composition by dropping focus without
+                        // a separate unmark callback. Do not leave this field
+                        // permanently intercepting future Enter/arrow keys.
+                        this.marked_range = None;
                         cx.emit(TextInputEvent::Blurred);
                     }),
                 );
@@ -774,9 +778,11 @@ impl Render for TextInput {
 
         let mut highlights: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
         if is_focused && !is_empty {
-            if let Some(range) = self.selection_range() {
-                if !range.is_empty() {
-                    highlights.push((range, selection_hl));
+            if self.marked_range.is_none() {
+                if let Some(range) = self.selection_range() {
+                    if !range.is_empty() {
+                        highlights.push((range, selection_hl));
+                    }
                 }
             }
             if let Some(range) = self.marked_range.clone() {
