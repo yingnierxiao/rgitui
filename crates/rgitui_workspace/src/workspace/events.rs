@@ -1434,6 +1434,24 @@ pub(super) fn subscribe_project(cx: &mut Context<Workspace>, subs: ProjectSubscr
                     }
                 }
 
+                // Optimistic checkboxes must roll back when staging fails.
+                // Successful operations are reconciled against StatusChanged,
+                // which carries the actual index state for this project.
+                if update.state == GitOperationState::Failed {
+                    let stage = match update.kind {
+                        GitOperationKind::Stage => Some(true),
+                        GitOperationKind::Unstage => Some(false),
+                        _ => None,
+                    };
+                    if let Some(stage) = stage {
+                        if let Some(tab) = this.tabs.iter().find(|tab| tab.project == project) {
+                            tab.changes_panel.update(cx, |panel, cx| {
+                                panel.rollback_pending(stage, cx);
+                            });
+                        }
+                    }
+                }
+
                 toolbar.update(cx, |tb, cx| {
                     tb.set_fetching(is_running && update.kind == GitOperationKind::Fetch, cx);
                     tb.set_pulling(is_running && update.kind == GitOperationKind::Pull, cx);
