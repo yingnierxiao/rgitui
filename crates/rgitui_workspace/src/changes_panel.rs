@@ -186,6 +186,12 @@ impl ChangeKindFilter {
     }
 }
 
+/// DiscardFile checks out HEAD, so it is safe only when this path has
+/// no staged side that would otherwise be lost.
+fn can_discard_to_head(row: &ChangeRow) -> bool {
+    row.unstaged.is_some() && row.staged.is_none()
+}
+
 fn change_matches_filter(
     row: &ChangeRow,
     needle: &str,
@@ -1342,7 +1348,7 @@ impl Render for ChangesPanel {
                     if row.staged.is_some() {
                         item_count += 1;
                     }
-                    if row.unstaged.is_some() && row.staged.is_none() {
+                    if can_discard_to_head(row) {
                         item_count += 1;
                         separator_count += 1;
                     }
@@ -1775,6 +1781,29 @@ mod tests {
             visual_header_state(&rows, &[0, 1, 2], &overrides),
             CheckState::Indeterminate
         );
+    }
+
+    #[test]
+    fn discard_to_head_is_hidden_when_any_staged_content_exists() {
+        let unstaged = ChangeRow {
+            path: PathBuf::from("unstaged.rs"),
+            staged: None,
+            unstaged: Some(file("unstaged.rs", FileChangeKind::Modified)),
+        };
+        let staged = ChangeRow {
+            path: PathBuf::from("staged.rs"),
+            staged: Some(file("staged.rs", FileChangeKind::Modified)),
+            unstaged: None,
+        };
+        let partial = ChangeRow {
+            path: PathBuf::from("partial.rs"),
+            staged: Some(file("partial.rs", FileChangeKind::Modified)),
+            unstaged: Some(file("partial.rs", FileChangeKind::Modified)),
+        };
+
+        assert!(can_discard_to_head(&unstaged));
+        assert!(!can_discard_to_head(&staged));
+        assert!(!can_discard_to_head(&partial));
     }
 
     #[test]
