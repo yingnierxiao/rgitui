@@ -14,8 +14,7 @@ use rgitui_i18n::{key, t, tp};
 use rgitui_settings::SettingsState;
 use rgitui_theme::{ActiveTheme, Color, StyledExt};
 use rgitui_ui::{
-    CheckState, Checkbox, DiffStat, Icon, IconName, IconSize, Label, LabelSize,
-    TextInput, TextInputEvent, Tooltip,
+    CheckState, Checkbox, DiffStat, Label, LabelSize, TextInput, TextInputEvent, Tooltip,
 };
 
 use crate::{Sidebar, SidebarEvent};
@@ -321,6 +320,7 @@ impl ChangesPanel {
 impl Render for ChangesPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.colors().clone();
+        let row_colors = colors.clone();
         let rows = self.rows.clone();
         let visible = self.visible.clone();
         let selected_path = self.selected_path.clone();
@@ -374,9 +374,9 @@ impl Render for ChangesPanel {
                         let weak_panel = panel.clone();
                         let path_selected = row.path.clone();
                         let path_tooltip = file_path.clone();
-                        let row_bg = colors.ghost_element_selected;
-                        let row_hover = colors.ghost_element_hover;
-                        let accent = colors.text_accent;
+                        let row_bg = row_colors.ghost_element_selected;
+                        let row_hover = row_colors.ghost_element_hover;
+                        let accent = row_colors.text_accent;
 
                         div()
                             .id(ElementId::NamedInteger("changes-file-row".into(), row_number as u64))
@@ -387,7 +387,7 @@ impl Render for ChangesPanel {
                             .gap(px(7.))
                             .items_center()
                             .border_l_2()
-                            .border_color(colors.border_transparent)
+                            .border_color(row_colors.border_transparent)
                             .when(is_selected, |el| {
                                 el.bg(row_bg).border_color(accent)
                             })
