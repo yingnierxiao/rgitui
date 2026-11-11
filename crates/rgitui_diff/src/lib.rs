@@ -3674,6 +3674,51 @@ impl Render for DiffViewer {
                 .into_any_element();
         }
 
+        // Some changed files have no textual hunks: mode-only changes,
+        // binary assets, empty additions, and certain Git metadata changes.
+        // Previously their selected path appeared in the header but the body
+        // was entirely blank, making a successful file click seem broken.
+        if self.diff.is_some()
+            && self.three_way_diff.is_none()
+            && self.display_rows.is_empty()
+        {
+            let label = self.file_path.clone().unwrap_or_default();
+            log::debug!("diff has no text rows: path={}", label);
+            return div()
+                .id("diff-viewer")
+                .v_flex()
+                .size_full()
+                .bg(colors.editor_background)
+                .child(
+                    div()
+                        .h_flex()
+                        .h(px(28.))
+                        .px_3()
+                        .items_center()
+                        .bg(colors.toolbar_background)
+                        .child(
+                            Label::new(label)
+                                .size(LabelSize::XSmall)
+                                .truncate(),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .p_4()
+                        .child(
+                            Label::new(t!("diff.no_text_changes"))
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        ),
+                )
+                .into_any_element();
+        }
+
         let display_rows = self.display_rows.clone();
         let sbs_rows = self.sbs_rows.clone();
         let three_way_rows = self.three_way_rows.clone();
