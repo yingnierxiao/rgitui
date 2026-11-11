@@ -476,6 +476,7 @@ impl ChangesPanel {
             self.selection_anchor = None;
             self.selected_path = None;
             self.selected_row = None;
+            self.context_menu = None;
             self.scroll = UniformListScrollHandle::new();
             cx.notify();
         }
@@ -502,6 +503,13 @@ impl ChangesPanel {
         {
             self.selected_path = None;
             self.selected_row = None;
+        }
+        if self
+            .context_menu
+            .as_ref()
+            .is_some_and(|menu| !updated.iter().any(|row| row.path == menu.path))
+        {
+            self.context_menu = None;
         }
         self.update_counts(&updated);
         self.rows = Arc::new(updated);
@@ -995,6 +1003,9 @@ impl Render for ChangesPanel {
                                                 false,
                                                 cx,
                                             );
+                                            if this.commit_in_progress {
+                                                return;
+                                            }
                                             this.context_menu = Some(ChangesContextMenuState {
                                                 path: context_menu_path.clone(),
                                                 position: event.position,
@@ -1167,7 +1178,13 @@ impl Render for ChangesPanel {
                     "down" | "j" => this.select_offset(1, modifiers.shift, cx),
                     "enter" => this.activate_selected(cx),
                     "space" | "s" => this.toggle_selected(cx),
-                    "escape" => this.clear_selection(cx),
+                    "escape" => {
+                        if this.context_menu.take().is_some() {
+                            cx.notify();
+                        } else {
+                            this.clear_selection(cx);
+                        }
+                    },
                     _ => cx.propagate(),
                 }
             }))
