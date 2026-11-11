@@ -1041,7 +1041,7 @@ impl Render for ChangesPanel {
                             .cursor_pointer()
                             .on_mouse_down(
                                 MouseButton::Right,
-                                move |event: &MouseDownEvent, _: &mut Window, cx: &mut App| {
+                                move |event: &MouseDownEvent, window: &mut Window, cx: &mut App| {
                                     cx.stop_propagation();
                                     weak_panel_context
                                         .update(cx, |this, cx| {
@@ -1055,6 +1055,7 @@ impl Render for ChangesPanel {
                                                 false,
                                                 cx,
                                             );
+                                            this.focus_handle.focus(window, cx);
                                             this.context_menu = Some(ChangesContextMenuState {
                                                 path: context_menu_path.clone(),
                                                 position: event.position,
@@ -1550,10 +1551,14 @@ impl Render for ChangesPanel {
                     .absolute()
                     .left(menu_x)
                     .top(menu_y)
+                    .occlude()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                         cx.stop_propagation();
                     })
                     .on_mouse_down(MouseButton::Right, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_mouse_move(|_, _, cx| {
                         cx.stop_propagation();
                     })
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
