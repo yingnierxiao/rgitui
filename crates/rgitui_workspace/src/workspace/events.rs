@@ -1499,7 +1499,7 @@ pub(super) fn subscribe_sidebar(
                         Ok(children) => {
                             sidebar.update(cx, |sidebar, cx| {
                                 sidebar.expand_untracked_directory(&directory_label, children, cx);
-                            }).ok();
+                            });
                         }
                         Err(error) => {
                             log::warn!(

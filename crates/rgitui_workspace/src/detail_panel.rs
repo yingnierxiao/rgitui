@@ -159,6 +159,7 @@ fn file_change_icon(kind: FileChangeKind) -> IconName {
         FileChangeKind::Copied => IconName::FileRenamed,
         FileChangeKind::TypeChange => IconName::FileModified,
         FileChangeKind::Untracked => IconName::FileAdded,
+        FileChangeKind::UntrackedDirectory => IconName::Folder,
         FileChangeKind::Conflicted => IconName::FileConflict,
     }
 }
@@ -171,7 +172,7 @@ fn file_change_color(kind: FileChangeKind) -> Color {
         FileChangeKind::Renamed => Color::Renamed,
         FileChangeKind::Copied => Color::Info,
         FileChangeKind::TypeChange => Color::Warning,
-        FileChangeKind::Untracked => Color::Untracked,
+        FileChangeKind::Untracked | FileChangeKind::UntrackedDirectory => Color::Untracked,
         FileChangeKind::Conflicted => Color::Conflict,
     }
 }
@@ -2270,6 +2271,14 @@ mod tests {
     }
 
     #[test]
+    fn test_file_change_icon_untracked_directory() {
+        assert_eq!(
+            file_change_icon(FileChangeKind::UntrackedDirectory),
+            IconName::Folder
+        );
+    }
+
+    #[test]
     fn test_file_change_icon_conflicted() {
         assert_eq!(
             file_change_icon(FileChangeKind::Conflicted),
@@ -2316,6 +2325,14 @@ mod tests {
     fn test_file_change_color_untracked() {
         assert_eq!(
             file_change_color(FileChangeKind::Untracked),
+            Color::Untracked
+        );
+    }
+
+    #[test]
+    fn test_file_change_color_untracked_directory() {
+        assert_eq!(
+            file_change_color(FileChangeKind::UntrackedDirectory),
             Color::Untracked
         );
     }
