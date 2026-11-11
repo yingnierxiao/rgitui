@@ -8589,6 +8589,46 @@ mod tests {
     }
 
     #[test]
+    fn virtual_commit_reconciles_only_included_real_index_paths() {
+        let fixture = make_test_repo();
+        let path = fixture.path();
+        let repo = git2::Repository::open(path).unwrap();
+        fs::write(path.join("pick[1].txt"), "base pick").unwrap();
+        fs::write(path.join("keep.txt"), "base keep").unwrap();
+        assert!(run_git(path, &["add", "-A"]).status.success());
+        assert!(run_git(path, &["commit", "-m", "base files"]).status.success());
+
+        fs::write(path.join("pick[1].txt"), "new pick").unwrap();
+        fs::write(path.join("keep.txt"), "new keep").unwrap();
+        assert!(run_git(path, &["add", "-A"]).status.success());
+        let selected = vec![super::CommitSelectedFile {
+            path: PathBuf::from("pick[1].txt"),
+            contents: super::CommitFileContents::WorkingTree,
+        }];
+        let tree_oid = super::tree_for_virtual_selection(
+            &repo,
+            path,
+            &selected,
+            &[PathBuf::from("keep.txt")],
+            false,
+        )
+        .unwrap();
+        let tree = repo.find_tree(tree_oid).unwrap();
+        let sig = repo.signature().unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let new_oid = repo.commit(Some("HEAD"), &sig, &sig, "selected", &tree, &[&head]).unwrap();
+        super::reconcile_committed_index_paths(path, &[selected[0].path.clone()]).unwrap();
+
+        let updated = repo.find_commit(new_oid).unwrap();
+        let committed_tree = updated.tree().unwrap();
+        assert_eq!(blob_text(&repo, &committed_tree, "pick[1].txt"), "new pick");
+        assert_eq!(blob_text(&repo, &committed_tree, "keep.txt"), "base keep");
+        let output = run_git(path, &["diff", "--cached", "--name-only"]);
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "keep.txt");
+    }
+
+    #[test]
     fn virtual_commit_keeps_partial_stage_without_unstaged_hunks() {
         let fixture = make_test_repo();
         let path = fixture.path();
