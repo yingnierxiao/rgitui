@@ -731,7 +731,7 @@ impl Render for CommitPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.colors().clone();
         let summary_empty = self.summary_editor.read(cx).is_empty();
-        let can_commit = !summary_empty && self.staged_count > 0;
+        let can_commit = !summary_empty && self.staged_count > 0 && !self.committing;
         let summary_len = self.summary_editor.read(cx).text().chars().count();
         let description_len = self.description_editor.read(cx).text().chars().count();
         let description_lines = if description_len == 0 {
