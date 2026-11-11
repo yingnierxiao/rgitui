@@ -71,6 +71,18 @@ impl Workspace {
         let sidebar = cx.new(crate::Sidebar::new);
         let changes_panel = cx.new(|cx| crate::ChangesPanel::new(sidebar.downgrade(), cx));
         let commit_panel = cx.new(crate::CommitPanel::new);
+        // These are virtual file selections; Git status updates alone are no
+        // longer sufficient to update the Commit button's included-file count.
+        let selection_commit_panel = commit_panel.clone();
+        cx.subscribe(
+            &changes_panel,
+            move |_, _, event: &crate::ChangesPanelEvent, cx| {
+                let crate::ChangesPanelEvent::SelectionChanged(count) = event;
+                selection_commit_panel
+                    .update(cx, |panel, cx| panel.set_staged_count(*count, cx));
+            },
+        )
+        .detach();
         let toolbar = cx.new(|_cx| crate::Toolbar::new());
         let global_search_view = cx.new(crate::GlobalSearchView::new);
 
@@ -130,7 +142,6 @@ impl Workspace {
                 remotes,
                 stashes,
                 worktrees,
-                staged_count,
                 authors,
                 selected_worktree_path,
             ) = {
@@ -143,7 +154,7 @@ impl Workspace {
                 let remotes = proj.remotes().to_vec();
                 let stashes = proj.stashes().to_vec();
                 let worktrees = proj.worktrees().to_vec();
-                let staged_count = init_status.staged.len();
+
                 let mut seen = std::collections::HashSet::new();
                 let authors: Vec<(String, String)> = commits
                     .iter()
@@ -159,7 +170,6 @@ impl Workspace {
                     remotes,
                     stashes,
                     worktrees,
-                    staged_count,
                     authors,
                     proj.repo_path().to_path_buf(),
                 )
@@ -192,7 +202,8 @@ impl Workspace {
                     cx,
                 );
             });
-            commit_panel.update(cx, |cp, cx| cp.set_staged_count(staged_count, cx));
+            let selected_count = changes_panel.read(cx).selected_commit_count();
+            commit_panel.update(cx, |cp, cx| cp.set_staged_count(selected_count, cx));
         }
 
         // No ahead/behind pass here: the project has loaded no branches yet,
