@@ -1,6 +1,6 @@
 use super::messages::error_message;
 use anyhow::{Context as _, Result};
-use git2::Repository;
+use git2::{Repository, RepositoryState, StatusOptions};
 use gpui::{AsyncApp, Context, Task, WeakEntity};
 use rgitui_i18n::{msg, msgp, Message};
 use std::path::Path;
@@ -13,6 +13,87 @@ use super::refresh::{gather_refresh_data, gather_refresh_data_lightweight_cached
 use super::{
     head_branch_name, pull_target, push_target, GitProject, GitProjectEvent, RefreshData,
 };
+
+/// Non-fast-forward and fetch-first rejections are recoverable; permissions,
+/// network errors, protected branches, and hook rejections are not.
+fn is_remote_ahead_rejection(error: &str) -> bool {
+    let message = error.to_ascii_lowercase();
+    message.contains("[rejected]")
+        && (message.contains("(fetch first)")
+            || message.contains("(non-fast-forward)")
+            || message.contains("remote contains work that you do not have locally")
+            || message.contains("tip of your current branch is behind"))
+}
+
+/// Attempt to recover a normal rejected push by incorporating the exact
+/// destination ref. Never force push and never silently overwrite user changes.
+///
+/// A merge (rather than rebase) preserves local commit IDs and matches the
+/// GitHub Desktop-style "pull then push" behavior. Git can fail if a conflict
+/// needs user attention; that failure is deliberately returned to the UI.
+fn push_with_auto_pull(
+    worktree: &Path,
+    args: &[&str],
+    remote: &str,
+    remote_branch: &str,
+    force: bool,
+    pulled: &mut bool,
+) -> Result<Option<String>> {
+    match run_git_network_command(worktree, args) {
+        Ok(details) => Ok(details),
+        Err(push_error) if !force && is_remote_ahead_rejection(&push_error.to_string()) => {
+            log::info!(
+                "Push rejected because remote {}/{} is ahead; trying automatic pull",
+                remote,
+                remote_branch
+            );
+            let repo = open_worktree_repo(worktree)?;
+            if repo.state() != RepositoryState::Clean {
+                anyhow::bail!(
+                    "Remote {remote}/{remote_branch} has new commits. Automatic pull was skipped \
+                     because another Git operation is in progress; finish or abort it before pushing."
+                );
+            }
+            let mut options = StatusOptions::new();
+            options
+                .include_untracked(false)
+                .include_ignored(false)
+                .include_unmodified(false);
+            if !repo.statuses(Some(&mut options))?.is_empty() {
+                anyhow::bail!(
+                    "Remote {remote}/{remote_branch} has new commits, but this checkout has \
+                     uncommitted changes. Commit or stash them before retrying Push."
+                );
+            }
+            drop(repo);
+            // Set before pulling: a merge conflict may modify HEAD, the index
+            // or the worktree even when the Git command returns an error.
+            *pulled = true;
+            run_git_network_command(
+                worktree,
+                &["pull", "--no-rebase", "--no-edit", remote, remote_branch],
+            )
+            .with_context(|| {
+                format!(
+                    "Automatic pull of {remote}/{remote_branch} could not finish. \
+                     Resolve any merge conflicts, then push again"
+                )
+            })?;
+
+            // Retry exactly once. A second rejection may mean a concurrent
+            // remote update; never loop indefinitely or silently force.
+            let details = run_git_network_command(worktree, args)
+                .context("Push was rejected again after automatic pull; fetch and review the remote changes")?;
+            let auto_pull_detail =
+                format!("Automatically pulled {remote}/{remote_branch} before pushing.");
+            Ok(Some(match details {
+                Some(details) => format!("{auto_pull_detail}\n{details}"),
+                None => auto_pull_detail,
+            }))
+        }
+        Err(error) => Err(error),
+    }
+}
 
 /// A successful "Already up to date" pull cannot change the checked-out
 /// index/worktree when AutoStash is disabled. Conflicts and AutoStash always
@@ -570,6 +651,8 @@ impl GitProject {
             self.commit_limit,
             self.loaded_commit_count(),
         );
+        let refresh_caches = self.refresh_caches.clone();
+        let author_filter = self.commit_author_filter.clone();
         let kind = GitOperationKind::push(force);
         let operation_id = self.begin_operation(
             kind,
@@ -592,10 +675,11 @@ impl GitProject {
         );
         self.note_operation_worktree(operation_id, worktree_path);
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let result: anyhow::Result<(Message, Option<String>, RefreshData)> = cx
+            let (result, failure_refresh) = cx
                 .background_executor()
                 .spawn(async move {
-                    let (msg, details) = {
+                    let mut pulled = false;
+                    let result: anyhow::Result<(Message, Option<String>, RefreshData)> = (|| {
                         let repo = Repository::open(&task_worktree_path)?;
                         let branch_name = head_branch_name(&repo)?;
                         drop(repo);
@@ -613,7 +697,14 @@ impl GitProject {
                         args.push(task_remote_name.as_str());
                         let refspec = format!("HEAD:{}", task_remote_branch_name);
                         args.push(refspec.as_str());
-                        let details = run_git_network_command(&task_worktree_path, &args)?;
+                        let details = push_with_auto_pull(
+                            &task_worktree_path,
+                            &args,
+                            &task_remote_name,
+                            &task_remote_branch_name,
+                            force,
+                            &mut pulled,
+                        )?;
                         let msg = if force {
                             msg!(
                                 "git.force_push.done",
@@ -636,10 +727,35 @@ impl GitProject {
                                 remote_branch = &task_remote_branch_name
                             )
                         };
-                        (msg, details)
+                        let data = if pulled {
+                            refresh_caches.mark_worktree_status_dirty(&task_worktree_path);
+                            gather_refresh_data_lightweight_cached(
+                                &repo_path,
+                                commit_limit,
+                                &refresh_caches,
+                                author_filter.as_deref(),
+                            )?
+                        } else {
+                            gather_refresh_data(&repo_path, commit_limit)?
+                        };
+                        Ok((msg, details, data))
+                    })();
+
+                    // A failed automatic merge may have changed the working tree
+                    // and index. Refresh even on failure so conflict UI is live.
+                    let failure_refresh = if result.is_err() && pulled {
+                        refresh_caches.mark_worktree_status_dirty(&task_worktree_path);
+                        gather_refresh_data_lightweight_cached(
+                            &repo_path,
+                            commit_limit,
+                            &refresh_caches,
+                            author_filter.as_deref(),
+                        )
+                        .ok()
+                    } else {
+                        None
                     };
-                    let data = gather_refresh_data(&repo_path, commit_limit)?;
-                    Ok((msg, details, data))
+                    (result, failure_refresh)
                 })
                 .await;
 
@@ -664,6 +780,13 @@ impl GitProject {
                             cx.emit(GitProjectEvent::RefsChanged);
                         }
                         Err(e) => {
+                            if let Some(data) = failure_refresh {
+                                this.apply_refresh_data(data);
+                                if this.needs_graph_state_refresh() {
+                                    this.refresh_ahead_behind(cx);
+                                }
+                                cx.emit(GitProjectEvent::RepositoryChanged);
+                            }
                             log::error!("Push failed: {}", e);
                             this.fail_op(
                                 operation_id,
