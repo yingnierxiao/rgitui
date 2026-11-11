@@ -1239,6 +1239,13 @@ impl Render for Workspace {
                             self.layout.commit_input_height,
                             commit_panel_collapsed,
                         );
+                        // Shared by the tab bar, content area, and commit form.
+                        // These must live outside the tab bar's .child({ ... })
+                        // scope or the later siblings cannot reference them.
+                        let is_details =
+                            active_tab.right_panel_mode == RightPanelMode::Details;
+                        let is_history =
+                            active_tab.right_panel_mode == RightPanelMode::History;
                         div()
                             .relative()
                             .w(px(detail_panel_width))
@@ -1265,10 +1272,6 @@ impl Render for Workspace {
                             )
                             // Right panel tabs (Changes / History / Issues / PRs)
                             .child({
-                                let is_details =
-                                    active_tab.right_panel_mode == RightPanelMode::Details;
-                                let is_history =
-                                    active_tab.right_panel_mode == RightPanelMode::History;
                                 let is_issues =
                                     active_tab.right_panel_mode == RightPanelMode::Issues;
                                 let is_prs =
