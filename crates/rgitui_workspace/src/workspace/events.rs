@@ -1192,6 +1192,27 @@ pub(super) fn subscribe_project(cx: &mut Context<Workspace>, subs: ProjectSubscr
                 }
 
                 update_sidebar_for_active_worktree(this, cx);
+                // Background project tabs must stay up to date too: switching
+                // tabs does not necessarily trigger a repository refresh.
+                if let Some(tab) = this.tabs.iter().find(|tab| tab.project == project) {
+                    let is_active = this
+                        .tabs
+                        .get(this.active_tab)
+                        .is_some_and(|active| active.project == project);
+                    if !is_active {
+                        let (status, selected_path) = {
+                            let proj = project.read(cx);
+                            active_worktree_status(tab, proj)
+                        };
+                        let panel = tab.changes_panel.clone();
+                        let staged = status.staged.clone();
+                        let unstaged = status.unstaged.clone();
+                        panel.update(cx, |panel, cx| {
+                            panel.set_worktree(selected_path, cx);
+                            panel.update_status(staged, unstaged, cx);
+                        });
+                    }
+                }
 
                 // Refresh diff viewer if currently displaying a working-tree
                 // diff. Commit and stash diffs are immutable (don't refresh)
@@ -1491,6 +1512,7 @@ pub(super) fn subscribe_sidebar(
                 let directory = std::path::PathBuf::from(path);
                 let directory_label = path.clone();
                 let repo_path = this.effective_worktree_path(cx);
+                let expansion_worktree = repo_path.clone();
                 let sidebar = _sidebar.clone();
                 let changes_panel = this
                     .tabs
@@ -1513,6 +1535,7 @@ pub(super) fn subscribe_sidebar(
                             if let Some(changes_panel) = changes_panel {
                                 changes_panel.update(cx, |panel, cx| {
                                     panel.expand_untracked_directory(
+                                        &expansion_worktree,
                                         std::path::Path::new(&directory_label),
                                         flat_children,
                                         cx,

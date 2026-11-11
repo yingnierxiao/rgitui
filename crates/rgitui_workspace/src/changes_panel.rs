@@ -216,10 +216,16 @@ impl ChangesPanel {
     /// handler so that existing operations and keyboard paths stay consistent.
     pub fn expand_untracked_directory(
         &mut self,
+        worktree: &Path,
         path: &Path,
         children: Vec<FileStatus>,
         cx: &mut Context<Self>,
     ) {
+        // Ignore a directory expansion that finished after the user switched
+        // to another worktree, even when both use the same relative path.
+        if self.worktree_path.as_deref() != Some(worktree) {
+            return;
+        }
         let Some(index) = self.rows.iter().position(|row| {
             row.path == path && row.kind() == FileChangeKind::UntrackedDirectory
         }) else {
@@ -292,7 +298,8 @@ impl ChangesPanel {
         }
         let last = self.visible.len() - 1;
         let next = match (self.selected_row, direction) {
-            (None, _) | (Some(0), d) if d < 0 => 0,
+            (None, _) => 0,
+            (Some(0), d) if d < 0 => 0,
             (Some(index), d) if d > 0 => (index + 1).min(last),
             (Some(index), _) => index.saturating_sub(1),
         };
@@ -313,7 +320,8 @@ impl Render for ChangesPanel {
         let panel = cx.weak_entity();
         let show_line_stats = cx.global::<SettingsState>().settings().show_change_line_stats;
         let staged_count = rows.iter().filter(|row| row.staged.is_some()).count();
-        let all_checked = !rows.is_empty() && rows.iter().all(|row| row.state() == CheckState::Checked);
+        let all_checked =
+            !rows.is_empty() && rows.iter().all(|row| row.state() == CheckState::Checked);
         let selected_some = staged_count > 0;
         let header_state = if all_checked {
             CheckState::Checked
@@ -465,7 +473,7 @@ impl Render for ChangesPanel {
                     "up" | "k" => this.select_offset(-1, cx),
                     "down" | "j" => this.select_offset(1, cx),
                     "enter" => this.activate_selected(cx),
-                    "space" | "s" => this.toggle_selected(cx),
+                    "space" => this.toggle_selected(cx),
                     _ => cx.propagate(),
                 }
             }))
