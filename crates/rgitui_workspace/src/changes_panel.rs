@@ -368,6 +368,7 @@ pub struct ChangesPanel {
     selection_anchor: Option<PathBuf>,
     /// Cached counts avoid scanning huge working trees on every 60 FPS render.
     staged_count: usize,
+    commit_in_progress: bool,
     header_state: CheckState,
     header_action: Option<SidebarEvent>,
     filter: String,
@@ -410,6 +411,7 @@ impl ChangesPanel {
             selected_paths: Arc::new(HashSet::new()),
             selection_anchor: None,
             staged_count: 0,
+            commit_in_progress: false,
             header_state: CheckState::Unchecked,
             header_action: None,
             filter: String::new(),
@@ -635,12 +637,22 @@ impl ChangesPanel {
         self.staged_count
     }
 
+    pub fn set_commit_in_progress(&mut self, active: bool, cx: &mut Context<Self>) {
+        if self.commit_in_progress != active {
+            self.commit_in_progress = active;
+            cx.notify();
+        }
+    }
+
     fn set_virtual_paths(
         &mut self,
         paths: &[PathBuf],
         desired: CheckState,
         cx: &mut Context<Self>,
     ) {
+        if self.commit_in_progress {
+            return;
+        }
         let mut changed = false;
         for path in paths {
             if let Ok(index) = self.rows.binary_search_by(|row| row.path.cmp(path)) {
@@ -761,6 +773,9 @@ impl ChangesPanel {
         extend: bool,
         cx: &mut Context<Self>,
     ) {
+        if self.commit_in_progress {
+            return;
+        }
         let Some(index) = self.visible.get(row_number).copied() else {
             return;
         };
@@ -846,7 +861,8 @@ impl Render for ChangesPanel {
         let show_line_stats = cx.global::<SettingsState>().settings().show_change_line_stats;
         let staged_count = self.staged_count;
         let header_state = self.header_state;
-        let has_selectable_rows = self.header_action.is_some();
+        let has_selectable_rows = self.header_action.is_some() && !self.commit_in_progress;
+        let is_committing = self.commit_in_progress;
         let panel_header = panel.clone();
         let file_count = rows.len();
         let kind_filter_button = panel.clone();
@@ -891,7 +907,7 @@ impl Render for ChangesPanel {
                         let kind = row.kind();
                         let is_selected = selected_paths.contains(&row.path);
                         let check_state = visual_state(row, &overrides);
-                        let disabled = row.has_conflict();
+                        let disabled = row.has_conflict() || is_committing;
                         let select_action = row.selected_event();
                         let staged_preview = row.staged_preview_event();
                         let stats = row.display_status().cloned();
