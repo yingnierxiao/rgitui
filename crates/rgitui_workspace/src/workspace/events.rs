@@ -1617,6 +1617,24 @@ pub(super) fn subscribe_sidebar(
                         .detach();
                 });
             }
+            SidebarEvent::StageFiles(paths) => {
+                let paths = paths.iter().map(std::path::PathBuf::from).collect::<Vec<_>>();
+                if !paths.is_empty() {
+                    let worktree_path = this.effective_worktree_path(cx);
+                    project.update(cx, |proj, cx| {
+                        proj.stage_files_at(&paths, &worktree_path, cx).detach();
+                    });
+                }
+            }
+            SidebarEvent::UnstageFiles(paths) => {
+                let paths = paths.iter().map(std::path::PathBuf::from).collect::<Vec<_>>();
+                if !paths.is_empty() {
+                    let worktree_path = this.effective_worktree_path(cx);
+                    project.update(cx, |proj, cx| {
+                        proj.unstage_files_at(&paths, &worktree_path, cx).detach();
+                    });
+                }
+            }
             SidebarEvent::StageAll => {
                 let worktree_path = this.effective_worktree_path(cx);
                 project.update(cx, |proj, cx| {

@@ -131,6 +131,57 @@ fn combine_changes(staged: Vec<FileStatus>, unstaged: Vec<FileStatus>) -> Vec<Ch
     rows
 }
 
+/// Determine header state and its action from *visible*, non-conflicted rows.
+/// If a filter hides files, the action is restricted to visible paths.
+fn bulk_toggle_for_visible(
+    rows: &[ChangeRow],
+    visible: &[usize],
+) -> (CheckState, Option<SidebarEvent>) {
+    let selectable = visible
+        .iter()
+        .filter_map(|&index| rows.get(index))
+        .filter(|row| !row.has_conflict())
+        .collect::<Vec<_>>();
+    if selectable.is_empty() {
+        return (CheckState::Unchecked, None);
+    }
+    let all_checked = selectable
+        .iter()
+        .all(|row| row.state() == CheckState::Checked);
+    let any_checked = selectable.iter().any(|row| row.staged.is_some());
+    let state = if all_checked {
+        CheckState::Checked
+    } else if any_checked {
+        CheckState::Indeterminate
+    } else {
+        CheckState::Unchecked
+    };
+
+    let action = if visible.len() == rows.len() {
+        if all_checked {
+            SidebarEvent::UnstageAll
+        } else {
+            SidebarEvent::StageAll
+        }
+    } else if all_checked {
+        SidebarEvent::UnstageFiles(
+            selectable
+                .iter()
+                .map(|row| row.path.to_string_lossy().to_string())
+                .collect(),
+        )
+    } else {
+        SidebarEvent::StageFiles(
+            selectable
+                .iter()
+                .filter(|row| row.unstaged.is_some())
+                .map(|row| row.path.to_string_lossy().to_string())
+                .collect(),
+        )
+    };
+    (state, Some(action))
+}
+
 fn change_color(kind: FileChangeKind) -> Color {
     match kind {
         FileChangeKind::Added
@@ -207,7 +258,8 @@ pub struct ChangesPanel {
     visible: Arc<Vec<usize>>,
     /// Cached counts avoid scanning huge working trees on every 60 FPS render.
     staged_count: usize,
-    fully_staged: bool,
+    header_state: CheckState,
+    header_action: Option<SidebarEvent>,
     filter: String,
     kind_filter: ChangeKindFilter,
     only_staged: bool,
@@ -244,7 +296,8 @@ impl ChangesPanel {
             rows: Arc::new(Vec::new()),
             visible: Arc::new(Vec::new()),
             staged_count: 0,
-            fully_staged: false,
+            header_state: CheckState::Unchecked,
+            header_action: None,
             filter: String::new(),
             kind_filter: ChangeKindFilter::All,
             only_staged: false,
@@ -332,10 +385,6 @@ impl ChangesPanel {
 
     fn update_counts(&mut self, rows: &[ChangeRow]) {
         self.staged_count = rows.iter().filter(|row| row.staged.is_some()).count();
-        self.fully_staged = !rows.is_empty()
-            && rows
-                .iter()
-                .all(|row| row.state() == CheckState::Checked);
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -368,6 +417,9 @@ impl ChangesPanel {
                     .then_with(|| left_row.path.cmp(&right_row.path))
             });
         }
+        let (state, action) = bulk_toggle_for_visible(&self.rows, &visible);
+        self.header_state = state;
+        self.header_action = action;
         self.visible = Arc::new(visible);
         self.selected_row = self
             .selected_path
@@ -429,15 +481,8 @@ impl Render for ChangesPanel {
         let panel = cx.weak_entity();
         let show_line_stats = cx.global::<SettingsState>().settings().show_change_line_stats;
         let staged_count = self.staged_count;
-        let all_checked = self.fully_staged;
-        let selected_some = staged_count > 0;
-        let header_state = if all_checked {
-            CheckState::Checked
-        } else if selected_some {
-            CheckState::Indeterminate
-        } else {
-            CheckState::Unchecked
-        };
+        let header_state = self.header_state;
+        let header_action = self.header_action.clone();
         let sidebar_header = sidebar.clone();
         let file_count = rows.len();
         let kind_filter_button = panel.clone();
@@ -641,18 +686,14 @@ impl Render for ChangesPanel {
                     .border_color(colors.border_variant)
                     .child(
                         Checkbox::new("changes-check-all", header_state)
-                            .disabled(file_count == 0)
+                            .disabled(header_action.is_none())
                             .on_click(move |_, _, cx| {
                                 cx.stop_propagation();
-                                sidebar_header
-                                    .update(cx, |_, cx| {
-                                        cx.emit(if all_checked {
-                                            SidebarEvent::UnstageAll
-                                        } else {
-                                            SidebarEvent::StageAll
-                                        });
-                                    })
-                                    .ok();
+                                if let Some(ref action) = header_action {
+                                    sidebar_header
+                                        .update(cx, |_, cx| cx.emit(action.clone()))
+                                        .ok();
+                                }
                             }),
                     )
                     .child(
@@ -776,6 +817,57 @@ mod tests {
             additions: 0,
             deletions: 0,
         }
+    }
+
+    #[test]
+    fn filtering_bulk_selection_does_not_stage_hidden_paths() {
+        let rows = combine_changes(
+            vec![file("already.rs", FileChangeKind::Modified)],
+            vec![
+                file("visible.rs", FileChangeKind::Modified),
+                file("hidden.rs", FileChangeKind::Modified),
+            ],
+        );
+        let visible = rows
+            .iter()
+            .position(|row| row.path == PathBuf::from("visible.rs"))
+            .unwrap();
+        let (state, action) = bulk_toggle_for_visible(&rows, &[visible]);
+        assert_eq!(state, CheckState::Unchecked);
+        assert_eq!(action, Some(SidebarEvent::StageFiles(vec!["visible.rs".into()])));
+    }
+
+    #[test]
+    fn filtered_bulk_unstage_is_limited_to_visible_staged_files() {
+        let rows = combine_changes(
+            vec![
+                file("a.rs", FileChangeKind::Modified),
+                file("b.rs", FileChangeKind::Modified),
+            ],
+            vec![],
+        );
+        let (state, action) = bulk_toggle_for_visible(&rows, &[1]);
+        assert_eq!(state, CheckState::Checked);
+        assert_eq!(action, Some(SidebarEvent::UnstageFiles(vec!["b.rs".into()])));
+    }
+
+    #[test]
+    fn bulk_toggle_skips_conflicts_and_disables_conflict_only_lists() {
+        let rows = combine_changes(
+            vec![],
+            vec![
+                file("conflict.rs", FileChangeKind::Conflicted),
+                file("normal.rs", FileChangeKind::Modified),
+            ],
+        );
+        assert_eq!(
+            bulk_toggle_for_visible(&rows, &[0]),
+            (CheckState::Unchecked, None)
+        );
+        assert_eq!(
+            bulk_toggle_for_visible(&rows, &[0, 1]).1,
+            Some(SidebarEvent::StageAll)
+        );
     }
 
     #[test]

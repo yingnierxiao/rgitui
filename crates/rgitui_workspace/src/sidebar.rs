@@ -61,6 +61,10 @@ pub enum SidebarEvent {
     ExpandUntrackedDirectory(String),
     StageFile(String),
     UnstageFile(String),
+    /// Stage only the explicitly selected paths (e.g. filtered flat list).
+    StageFiles(Vec<String>),
+    /// Unstage only the explicitly selected paths.
+    UnstageFiles(Vec<String>),
     StageAll,
     UnstageAll,
     DiscardFile(String),
