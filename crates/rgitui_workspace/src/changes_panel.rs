@@ -1427,11 +1427,7 @@ impl Render for ChangesPanel {
                         );
                     }
 
-                    // The existing DiscardFile operation restores to HEAD and
-                    // would erase staged content too. Offer it only when the
-                    // file has no staged side; partially staged files can be
-                    // unstaged first, then safely discarded.
-                    if row.unstaged.is_some() && row.staged.is_none() {
+                    if row.unstaged.is_some() {
                         let sidebar = weak_sidebar.clone();
                         let panel = weak_panel.clone();
                         let path = row.path.to_string_lossy().to_string();
@@ -1477,7 +1473,11 @@ impl Render for ChangesPanel {
                         );
                     }
 
-                    if row.unstaged.is_some() {
+                    // The existing DiscardFile operation restores to HEAD and
+                    // would erase staged content too. Offer it only when the
+                    // file has no staged side; partially staged files can be
+                    // unstaged first, then safely discarded.
+                    if row.unstaged.is_some() && row.staged.is_none() {
                         let sidebar = weak_sidebar.clone();
                         let panel = weak_panel.clone();
                         let path = row.path.to_string_lossy().to_string();
