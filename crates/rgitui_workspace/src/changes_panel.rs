@@ -274,7 +274,7 @@ fn visual_state(row: &ChangeRow, overrides: &HashMap<PathBuf, CheckState>) -> Ch
 fn visual_header_state(
     rows: &[ChangeRow],
     visible: &[usize],
-    pending: &HashMap<PathBuf, CheckState>,
+    overrides: &HashMap<PathBuf, CheckState>,
 ) -> CheckState {
     let mut any = false;
     let mut all = true;
@@ -284,7 +284,7 @@ fn visual_header_state(
             continue;
         }
         found = true;
-        match visual_state(row, pending) {
+        match visual_state(row, overrides) {
             CheckState::Checked => any = true,
             CheckState::Indeterminate => {
                 any = true;
@@ -462,6 +462,7 @@ impl ChangesPanel {
         self.update_counts(&updated);
         self.rows = Arc::new(updated);
         self.rebuild_filter();
+        cx.emit(ChangesPanelEvent::SelectionChanged(self.staged_count));
         cx.notify();
     }
 
@@ -500,13 +501,17 @@ impl ChangesPanel {
             self.selected_row = None;
         }
         self.rebuild_filter();
+        cx.emit(ChangesPanelEvent::SelectionChanged(self.staged_count));
         cx.notify();
     }
 
     fn update_counts(&mut self, rows: &[ChangeRow]) {
         self.staged_count = rows
             .iter()
-            .filter(|row| visual_state(row, &self.overrides) != CheckState::Unchecked)
+            .filter(|row| {
+                !row.has_conflict()
+                    && visual_state(row, &self.overrides) != CheckState::Unchecked
+            })
             .count();
     }
 
@@ -1210,95 +1215,52 @@ mod tests {
     }
 
     #[test]
-    fn selected_checkbox_batches_stage_and_unstage_once() {
-        let rows = combine_changes(
-            vec![
-                file("fully-staged.rs", FileChangeKind::Modified),
-                file("staged.rs", FileChangeKind::Modified),
-            ],
-            vec![
-                file("a.rs", FileChangeKind::Modified),
-                file("b.rs", FileChangeKind::Modified),
-                file("partial.rs", FileChangeKind::Modified),
-                file("staged.rs", FileChangeKind::Modified),
-                file("conflict.rs", FileChangeKind::Conflicted),
-            ],
-        );
-        let visible: Vec<usize> = (0..rows.len()).collect();
-        let selected: HashSet<PathBuf> = rows.iter().map(|r| r.path.clone()).collect();
-        let pending = HashMap::from([(PathBuf::from("b.rs"), CheckState::Checked)]);
-        assert_eq!(
-            selected_staging_action(
-                &rows,
-                &visible,
-                &selected,
-                &pending,
-                CheckState::Checked,
-            ),
-            Some(SidebarEvent::StageFiles(vec![
-                "a.rs".into(),
-                "partial.rs".into(),
-                "staged.rs".into(),
-            ]))
-        );
-        assert_eq!(
-            selected_staging_action(
-                &rows,
-                &visible,
-                &selected,
-                &pending,
-                CheckState::Unchecked,
-            ),
-            Some(SidebarEvent::UnstageFiles(vec![
-                "fully-staged.rs".into(),
-                "staged.rs".into(),
-            ]))
-        );
-    }
-
-    #[test]
-    fn group_action_never_touches_hidden_selected_paths() {
+    fn selected_virtual_paths_include_only_visible_nonconflicting_rows() {
         let rows = combine_changes(
             vec![],
             vec![
+                file("a.rs", FileChangeKind::Modified),
+                file("b.rs", FileChangeKind::Modified),
+                file("conflict.rs", FileChangeKind::Conflicted),
                 file("hidden.rs", FileChangeKind::Modified),
-                file("visible.rs", FileChangeKind::Modified),
             ],
         );
         let selected: HashSet<PathBuf> = rows.iter().map(|row| row.path.clone()).collect();
         assert_eq!(
-            selected_staging_action(
-                &rows,
-                &[1],
-                &selected,
-                &HashMap::new(),
-                CheckState::Checked,
-            ),
-            Some(SidebarEvent::StageFiles(vec!["visible.rs".into()]))
+            selected_virtual_paths(&rows, &[0, 1, 2], &selected),
+            vec![PathBuf::from("a.rs"), PathBuf::from("b.rs")]
         );
     }
 
     #[test]
-    fn optimistic_states_reconcile_only_after_index_confirms_them() {
-        let rows = combine_changes(vec![], vec![file("a.rs", FileChangeKind::Modified)]);
-        let mut pending = HashMap::from([(PathBuf::from("a.rs"), CheckState::Checked)]);
-        assert_eq!(visual_state(&rows[0], &overrides), CheckState::Checked);
-        assert!(!reconcile_pending(&rows, &mut pending));
-        assert_eq!(visual_header_state(&rows, &[0], &overrides), CheckState::Checked);
-        let confirmed = combine_changes(vec![file("a.rs", FileChangeKind::Modified)], vec![]);
-        assert!(reconcile_pending(&confirmed, &mut pending));
-        assert!(pending.is_empty());
+    fn virtual_choices_survive_git_status_snapshots() {
+        let unstaged = combine_changes(vec![], vec![file("a.rs", FileChangeKind::Modified)]);
+        let overrides = HashMap::from([(PathBuf::from("a.rs"), CheckState::Checked)]);
+        assert_eq!(visual_state(&unstaged[0], &overrides), CheckState::Checked);
+        let staged = combine_changes(vec![file("a.rs", FileChangeKind::Modified)], vec![]);
+        assert_eq!(visual_state(&staged[0], &overrides), CheckState::Checked);
+        let unchecked =
+            HashMap::from([(PathBuf::from("a.rs"), CheckState::Unchecked)]);
+        assert_eq!(visual_state(&staged[0], &unchecked), CheckState::Unchecked);
+        assert_eq!(
+            visual_header_state(&staged, &[0], &unchecked),
+            CheckState::Unchecked
+        );
     }
 
     #[test]
-    fn optimistic_unstage_waits_for_actual_index_change() {
-        let staged = combine_changes(vec![file("a.rs", FileChangeKind::Modified)], vec![]);
-        let mut pending = HashMap::from([(PathBuf::from("a.rs"), CheckState::Unchecked)]);
-        assert!(!reconcile_pending(&staged, &mut pending));
-        assert_eq!(visual_state(&staged[0], &overrides), CheckState::Unchecked);
-        let unstaged = combine_changes(vec![], vec![file("a.rs", FileChangeKind::Modified)]);
-        assert!(reconcile_pending(&unstaged, &mut pending));
-        assert!(pending.is_empty());
+    fn initial_partial_staging_remains_indeterminate() {
+        let rows = combine_changes(
+            vec![file("partial.rs", FileChangeKind::Modified)],
+            vec![file("partial.rs", FileChangeKind::Modified)],
+        );
+        assert_eq!(
+            visual_state(&rows[0], &HashMap::new()),
+            CheckState::Indeterminate
+        );
+        let overrides =
+            HashMap::from([(PathBuf::from("partial.rs"), CheckState::Checked)]);
+        assert_eq!(visual_state(&rows[0], &overrides), CheckState::Checked);
     }
 
     #[test]
