@@ -295,6 +295,38 @@ fn tree_for_virtual_selection(
     Ok(tree_oid)
 }
 
+/// After HEAD advances, clear only the committed paths from the REAL index.
+/// Use literal NUL-delimited pathspecs; libgit2 pathspec matching could otherwise
+/// reset unrelated files whose names contain '[' or '*' characters.
+fn reconcile_committed_index_paths(worktree: &Path, paths: &[PathBuf]) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let temp = tempfile::tempdir()?;
+    let list = temp.path().join("committed.paths");
+    let paths = paths.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    write_selection_pathspec(&list, &paths)?;
+    let spec = format!("--pathspec-from-file={}", list.display());
+    let output = super::git_command()
+        .current_dir(worktree)
+        .args([
+            "--literal-pathspecs",
+            "reset",
+            "--quiet",
+            "HEAD",
+            &spec,
+            "--pathspec-file-nul",
+        ])
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "Unable to reconcile committed files in real index: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 /// Commit the resolved merge in `repo` with its stored `MERGE_MSG`, exactly as
 /// `git merge --continue` does: the index is committed as the user staged it,
 /// with `MERGE_HEAD`'s commits as the extra parents. Untracked and unstaged
@@ -996,9 +1028,8 @@ impl GitProject {
                             .iter()
                             .map(|file| file.path.clone())
                             .collect::<Vec<_>>();
-                        let committed = repo.find_commit(oid)?;
                         if let Err(error) =
-                            repo.reset_default(Some(committed.as_object()), &paths)
+                            reconcile_committed_index_paths(&worktree_path, &paths)
                         {
                             // The commit already succeeded; never report an
                             // ordinary failure that encourages a duplicate commit.
