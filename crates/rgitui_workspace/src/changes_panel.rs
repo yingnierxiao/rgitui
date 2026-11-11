@@ -313,17 +313,14 @@ fn build_commit_selection(
                 });
                 // A rename is a pair: the original path must be removed when
                 // the new one is selected, even if status only lists its new path.
-                if row.kind() == FileChangeKind::Renamed {
-                    if let Some(old_path) = row
-                        .unstaged
-                        .as_ref()
-                        .or(row.staged.as_ref())
-                        .and_then(|file| file.old_path.as_ref())
-                    {
-                        rename_sources.push(CommitSelectedFile {
-                            path: old_path.clone(),
-                            contents,
-                        });
+                for status in row.staged.iter().chain(row.unstaged.iter()) {
+                    if status.kind == FileChangeKind::Renamed {
+                        if let Some(old_path) = status.old_path.as_ref() {
+                            rename_sources.push(CommitSelectedFile {
+                                path: old_path.clone(),
+                                contents,
+                            });
+                        }
                     }
                 }
             } else {
