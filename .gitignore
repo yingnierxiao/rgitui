@@ -47,3 +47,4 @@ dhat-heap.json
 .env.local
 MEMORY.md
 PLAN.md
+*.log
