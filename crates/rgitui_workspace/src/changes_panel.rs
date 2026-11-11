@@ -361,6 +361,8 @@ pub struct ChangesPanel {
     sidebar: WeakEntity<Sidebar>,
     rows: Arc<Vec<ChangeRow>>,
     overrides: Arc<HashMap<PathBuf, CheckState>>,
+    /// Keep virtual selection separate for each inspected worktree.
+    worktree_overrides: HashMap<PathBuf, HashMap<PathBuf, CheckState>>,
     visible: Arc<Vec<usize>>,
     selected_paths: Arc<HashSet<PathBuf>>,
     selection_anchor: Option<PathBuf>,
@@ -403,6 +405,7 @@ impl ChangesPanel {
             sidebar,
             rows: Arc::new(Vec::new()),
             overrides: Arc::new(HashMap::new()),
+            worktree_overrides: HashMap::new(),
             visible: Arc::new(Vec::new()),
             selected_paths: Arc::new(HashSet::new()),
             selection_anchor: None,
@@ -424,8 +427,12 @@ impl ChangesPanel {
 
     pub fn set_worktree(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if self.worktree_path.as_ref() != Some(&path) {
+            if let Some(previous) = self.worktree_path.take() {
+                self.worktree_overrides
+                    .insert(previous, self.overrides.as_ref().clone());
+            }
+            self.overrides = Arc::new(self.worktree_overrides.remove(&path).unwrap_or_default());
             self.worktree_path = Some(path);
-            self.overrides = Arc::new(HashMap::new());
             self.selected_paths = Arc::new(HashSet::new());
             self.selection_anchor = None;
             self.selected_path = None;
@@ -580,19 +587,47 @@ impl ChangesPanel {
     pub fn commit_selection(&self) -> (Vec<CommitSelectedFile>, Vec<PathBuf>) {
         let mut included = Vec::new();
         let mut excluded = Vec::new();
+        let mut rename_sources = Vec::new();
         for row in self.rows.iter().filter(|row| !row.has_conflict()) {
-            match visual_state(row, &self.overrides) {
-                CheckState::Checked => included.push(CommitSelectedFile {
+            let state = visual_state(row, &self.overrides);
+            let contents = match state {
+                CheckState::Checked => Some(CommitFileContents::WorkingTree),
+                CheckState::Indeterminate => Some(CommitFileContents::Staged),
+                CheckState::Unchecked => None,
+            };
+            if let Some(contents) = contents {
+                included.push(CommitSelectedFile {
                     path: row.path.clone(),
-                    contents: CommitFileContents::WorkingTree,
-                }),
-                CheckState::Indeterminate => included.push(CommitSelectedFile {
-                    path: row.path.clone(),
-                    contents: CommitFileContents::Staged,
-                }),
-                CheckState::Unchecked => excluded.push(row.path.clone()),
+                    contents,
+                });
+                // A rename is a pair: the original path must be removed when
+                // the new one is selected, even if status only lists its new path.
+                if row.kind() == FileChangeKind::Renamed {
+                    if let Some(old_path) = row
+                        .unstaged
+                        .as_ref()
+                        .or(row.staged.as_ref())
+                        .and_then(|file| file.old_path.as_ref())
+                    {
+                        rename_sources.push(CommitSelectedFile {
+                            path: old_path.clone(),
+                            contents,
+                        });
+                    }
+                }
+            } else {
+                excluded.push(row.path.clone());
             }
         }
+
+        for old in rename_sources {
+            if !included.iter().any(|file| file.path == old.path) {
+                included.push(old);
+            }
+        }
+        // Rename sources are included even if a stale separate status entry
+        // listed the old path as excluded.
+        excluded.retain(|path| !included.iter().any(|file| &file.path == path));
         (included, excluded)
     }
 
