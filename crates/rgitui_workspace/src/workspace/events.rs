@@ -3059,15 +3059,20 @@ pub(super) fn subscribe_commit_panel(
                 let weak_workspace = cx.entity().downgrade();
                 let panel_for_result = commit_panel_ref.clone();
                 cx.spawn(async move |_, cx: &mut gpui::AsyncApp| {
-                    // Preserve the message and selection on failure so the
-                    // user can fix a hook/index conflict and retry safely.
-                    if commit_task.await.is_ok() {
-                        cx.update(|cx| {
-                            panel_for_result.update(cx, |panel, cx| {
-                                panel.set_message(String::new(), cx);
-                            });
+                    // A failed temporary-index preparation must restore the
+                    // editability of the commit message without clearing it.
+                    let succeeded = commit_task.await.is_ok();
+                    cx.update(|cx| {
+                        panel_for_result.update(cx, |panel, cx| {
+                            panel.complete_commit(succeeded, cx);
+                        });
+                        if succeeded {
                             changes_panel.update(cx, |panel, cx| {
-                                panel.commit_succeeded(&committed_paths, cx);
+                                panel.commit_succeeded(
+                                    &worktree_path,
+                                    &committed_paths,
+                                    cx,
+                                );
                             });
                             if !is_amend {
                                 if let Some(oid_hex) = previous_head_oid {
@@ -3082,8 +3087,8 @@ pub(super) fn subscribe_commit_panel(
                                         .ok();
                                 }
                             }
-                        })?;
-                    }
+                        }
+                    })?;
                     anyhow::Ok(())
                 })
                 .detach();
