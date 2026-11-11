@@ -533,7 +533,7 @@ impl ChangesPanel {
                 continue;
             }
             if paths.is_some_and(|paths| {
-                !paths.iter().any(|path| row.path == Path::new(path))
+                !paths.iter().any(|path| row.path.as_path() == Path::new(path))
             }) {
                 continue;
             }
