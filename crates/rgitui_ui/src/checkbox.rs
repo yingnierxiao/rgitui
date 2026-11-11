@@ -170,10 +170,25 @@ impl RenderOnce for Checkbox {
         if self.disabled {
             container = container.opacity(0.5);
         } else {
+            // Hover and active pseudo-styles override the checkbox's own
+            // background. Applying the generic ghost background to a checked
+            // (or indeterminate) box makes it appear unchecked while the mouse
+            // is over it, even though its underlying state never changed.
+            // Preserve the accent fill for both selected states.
+            let hover_fill = if self.state == CheckState::Unchecked {
+                hover_bg
+            } else {
+                bg
+            };
+            let active_fill = if self.state == CheckState::Unchecked {
+                active_bg
+            } else {
+                bg
+            };
             container = container
                 .cursor(CursorStyle::PointingHand)
-                .hover(move |s| s.bg(hover_bg))
-                .active(move |s| s.bg(active_bg));
+                .hover(move |s| s.bg(hover_fill))
+                .active(move |s| s.bg(active_fill));
 
             if let Some(on_click) = self.on_click {
                 container = container.on_click(on_click);
