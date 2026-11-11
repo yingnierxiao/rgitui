@@ -5,7 +5,7 @@ use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
 use crate::types::*;
 
@@ -132,16 +132,13 @@ pub(super) struct RefreshCaches {
     commit_log: Mutex<Option<CommitLogEntry>>,
 }
 
-/// The commit list the last refresh loaded, and the key it was loaded under.
-///
-/// Weak, so it never keeps a list alive or holds a second copy of it: the entry
-/// is good for exactly as long as the project still shows that list. When the
-/// project appends a page in place (`Arc::make_mut`, which detaches weak
-/// handles rather than cloning) or replaces the list, the entry stops
-/// resolving and the next refresh runs `git log` again.
+/// One bounded in-memory history snapshot keyed by refs/HEAD, limit and
+/// author filter. A strong Arc survives UI replacement or pagination, avoiding
+/// a multi-second `git log` when no history-related ref moved. The entry is
+/// replaced after pagination, so at most one previous snapshot is retained.
 struct CommitLogEntry {
     key: u64,
-    commits: Weak<Vec<CommitInfo>>,
+    commits: Arc<Vec<CommitInfo>>,
     has_more: bool,
 }
 
@@ -234,13 +231,13 @@ impl RefreshCaches {
     fn reusable_commit_log(&self, key: u64) -> Option<(Arc<Vec<CommitInfo>>, bool)> {
         let entry = self.commit_log.lock().unwrap_or_else(|e| e.into_inner());
         let entry = entry.as_ref().filter(|entry| entry.key == key)?;
-        Some((entry.commits.upgrade()?, entry.has_more))
+        Some((Arc::clone(&entry.commits), entry.has_more))
     }
 
     fn keep_commit_log(&self, key: u64, commits: &Arc<Vec<CommitInfo>>, has_more: bool) {
         *self.commit_log.lock().unwrap_or_else(|e| e.into_inner()) = Some(CommitLogEntry {
             key,
-            commits: Arc::downgrade(commits),
+            commits: Arc::clone(commits),
             has_more,
         });
     }
@@ -258,7 +255,7 @@ impl RefreshCaches {
         self.seed_loaded_history(repo, commit_limit, None, commits, has_more);
     }
 
-    /// Reattach the weak cache to a commit list expanded by pagination. Ref
+    /// Reattach the cache to a commit list expanded by pagination. Ref
     /// stability is validated by the caller before re-seeding this cache.
     pub(super) fn seed_loaded_history(
         &self,
@@ -3136,29 +3133,34 @@ mod commit_log_reuse_tests {
     }
 
     #[test]
-    fn the_cache_does_not_make_appending_a_page_copy_the_list() {
+    fn history_cache_survives_when_ui_drops_its_original_arc() {
         let repo = TempRepo::with_commits(3);
         let caches = RefreshCaches::default();
-        let mut shown = gather(&repo, &caches, 10).recent_commits;
-        // A deep clone would copy every commit's strings; moving the list
-        // keeps them where they are.
-        let first_summary = shown[0].summary.as_ptr();
+        let first = gather(&repo, &caches, 10);
+        let old_ptr = Arc::as_ptr(&first.recent_commits);
+        drop(first);
 
-        // What loading another page does to the list the project shows. With
-        // only a weak handle outstanding, `make_mut` moves the list rather
-        // than cloning it.
-        let extra = shown[0].clone();
-        Arc::make_mut(&mut shown).push(extra);
-        assert_eq!(
-            shown[0].summary.as_ptr(),
-            first_summary,
-            "the commits were moved, not cloned"
-        );
+        // Previously the weak cache expired and triggered another git log.
+        let second = gather(&repo, &caches, 10);
+        assert_eq!(Arc::as_ptr(&second.recent_commits), old_ptr);
+    }
 
-        // And the list it was before is gone, so nothing hands it back.
-        let next = gather(&repo, &caches, 10);
-        assert_eq!(next.recent_commits.len(), 3);
-        assert!(!Arc::ptr_eq(&next.recent_commits, &shown));
+    #[test]
+    fn history_cache_reseeding_after_page_append_replaces_old_snapshot() {
+        let repo = TempRepo::with_commits(5);
+        let caches = RefreshCaches::default();
+        let initial = gather(&repo, &caches, 2);
+        let mut shown = initial.recent_commits;
+        let cursor = shown.last().map(|c| c.oid);
+        let tips = vec![(repo.head_oid(), false, "main".to_string())];
+        let (more, has_more) = load_more_commits_from_repo(
+            repo.path(), 2, cursor, 3, &tips, &[], None
+        ).unwrap();
+        Arc::make_mut(&mut shown).extend(more);
+        caches.seed_loaded_history(repo.repo(), 5, None, &shown, has_more);
+        let next = gather(&repo, &caches, 5);
+        assert!(Arc::ptr_eq(&shown, &next.recent_commits));
+        assert_eq!(next.recent_commits.len(), 5);
     }
 
     #[test]
