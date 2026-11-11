@@ -780,6 +780,11 @@ impl GitProject {
                     match result {
                         Ok((msg, details, data)) => {
                             this.apply_refresh_data(data);
+                            // An automatic pull can advance HEAD; update branch
+                            // graph state just as the explicit Pull path does.
+                            if this.needs_graph_state_refresh() {
+                                this.refresh_ahead_behind(cx);
+                            }
                             this.complete_op(
                                 operation_id,
                                 kind,
