@@ -411,7 +411,6 @@ impl TextInput {
         // and arrows navigate the candidate window. They must not trigger
         // commit submission or mutate our buffer as ordinary keyboard input.
         if self.marked_range.is_some() {
-            cx.propagate();
             return;
         }
 
