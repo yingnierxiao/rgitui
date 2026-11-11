@@ -558,7 +558,7 @@ impl ChangesPanel {
         if self
             .context_menu
             .as_ref()
-            .is_some_and(|menu| menu.path == path)
+            .is_some_and(|menu| menu.path.as_path() == path)
         {
             self.context_menu = None;
         }
