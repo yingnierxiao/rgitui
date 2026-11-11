@@ -196,15 +196,16 @@ fn tree_for_virtual_selection(
         .prefix("rgitui-commit-index-")
         .tempfile_in(repo.path())?
         .into_temp_path();
-    std::fs::remove_file(&temp_index)?;
+    let temp_index_path = temp_index.to_path_buf();
+    std::fs::remove_file(&temp_index_path)?;
     let real_index = repo.path().join("index");
     if real_index.exists() {
-        std::fs::copy(&real_index, &temp_index)
+        std::fs::copy(&real_index, &temp_index_path)
             .with_context(|| format!("Unable to copy index for {}", worktree.display()))?;
     } else if repo.head().is_ok() {
-        run_with_selected_index(worktree, &temp_index, &["read-tree", "HEAD"])?;
+        run_with_selected_index(worktree, &temp_index_path, &["read-tree", "HEAD"])?;
     } else {
-        run_with_selected_index(worktree, &temp_index, &["read-tree", "--empty"])?;
+        run_with_selected_index(worktree, &temp_index_path, &["read-tree", "--empty"])?;
     }
 
     // Reset excluded paths plus any externally staged paths that were not
@@ -214,7 +215,7 @@ fn tree_for_virtual_selection(
     let mut seen = excluded_paths.iter().cloned().collect::<std::collections::HashSet<_>>();
     let staged_output = super::git_command()
         .current_dir(worktree)
-        .env("GIT_INDEX_FILE", &temp_index)
+        .env("GIT_INDEX_FILE", &temp_index_path)
         .args(["diff", "--cached", "--no-renames", "--name-only", "-z"])
         .output()?;
     if !staged_output.status.success() {
@@ -239,7 +240,7 @@ fn tree_for_virtual_selection(
         if repo.head().is_ok() {
             run_with_selected_index(
                 worktree,
-                &temp_index,
+                &temp_index_path,
                 &[
                     "--literal-pathspecs",
                     "reset",
@@ -252,7 +253,7 @@ fn tree_for_virtual_selection(
         } else {
             run_with_selected_index(
                 worktree,
-                &temp_index,
+                &temp_index_path,
                 &[
                     "--literal-pathspecs",
                     "rm",
@@ -279,7 +280,7 @@ fn tree_for_virtual_selection(
         let arg = format!("--pathspec-from-file={}", list.display());
         run_with_selected_index(
             worktree,
-            &temp_index,
+            &temp_index_path,
             &[
                 "--literal-pathspecs",
                 "add",
@@ -290,7 +291,7 @@ fn tree_for_virtual_selection(
         )?;
     }
 
-    let oid = run_with_selected_index(worktree, &temp_index, &["write-tree"])?;
+    let oid = run_with_selected_index(worktree, &temp_index_path, &["write-tree"])?;
     let tree_oid = git2::Oid::from_str(oid.trim())
         .with_context(|| format!("Invalid tree id from temporary index: {oid}"))?;
     if !amend && repo.head().is_ok_and(|head| {
