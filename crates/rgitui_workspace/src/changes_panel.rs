@@ -14,7 +14,8 @@ use rgitui_i18n::{key, t, tp};
 use rgitui_settings::SettingsState;
 use rgitui_theme::{ActiveTheme, Color, StyledExt};
 use rgitui_ui::{
-    CheckState, Checkbox, DiffStat, Label, LabelSize, TextInput, TextInputEvent, Tooltip,
+    Button, ButtonSize, CheckState, Checkbox, DiffStat, Label, LabelSize, TextInput,
+    TextInputEvent, Tooltip,
 };
 
 use crate::{Sidebar, SidebarEvent};
@@ -128,6 +129,55 @@ fn change_color(kind: FileChangeKind) -> Color {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChangeKindFilter {
+    All,
+    Modified,
+    Added,
+    Deleted,
+    Other,
+}
+
+impl ChangeKindFilter {
+    fn next(self) -> Self {
+        match self {
+            Self::All => Self::Modified,
+            Self::Modified => Self::Added,
+            Self::Added => Self::Deleted,
+            Self::Deleted => Self::Other,
+            Self::Other => Self::All,
+        }
+    }
+
+    fn matches(self, kind: FileChangeKind) -> bool {
+        match self {
+            Self::All => true,
+            Self::Modified => kind == FileChangeKind::Modified,
+            Self::Added => matches!(kind, FileChangeKind::Added | FileChangeKind::Untracked),
+            Self::Deleted => kind == FileChangeKind::Deleted,
+            Self::Other => !matches!(
+                kind,
+                FileChangeKind::Modified
+                    | FileChangeKind::Added
+                    | FileChangeKind::Untracked
+                    | FileChangeKind::Deleted
+            ),
+        }
+    }
+}
+
+fn change_matches_filter(
+    row: &ChangeRow,
+    needle: &str,
+    kind: ChangeKindFilter,
+    only_staged: bool,
+) -> bool {
+    (!only_staged || row.staged.is_some())
+        && kind.matches(row.kind())
+        && (needle.is_empty()
+            || row.path.to_string_lossy().to_lowercase().contains(needle))
+}
+
 /// GitHub Desktop-style working-tree list. The repository navigation Sidebar
 /// retains sole ownership of Git actions; this panel forwards SidebarEvent
 /// instead of implementing a second set of Stage/Unstage handlers.
@@ -136,6 +186,9 @@ pub struct ChangesPanel {
     rows: Arc<Vec<ChangeRow>>,
     visible: Arc<Vec<usize>>,
     filter: String,
+    kind_filter: ChangeKindFilter,
+    only_staged: bool,
+    sort_by_kind: bool,
     filter_editor: Entity<TextInput>,
     selected_path: Option<PathBuf>,
     selected_row: Option<usize>,
@@ -168,6 +221,9 @@ impl ChangesPanel {
             rows: Arc::new(Vec::new()),
             visible: Arc::new(Vec::new()),
             filter: String::new(),
+            kind_filter: ChangeKindFilter::All,
+            only_staged: false,
+            sort_by_kind: false,
             filter_editor,
             selected_path: None,
             selected_row: None,
@@ -257,17 +313,27 @@ impl ChangesPanel {
 
     fn rebuild_filter(&mut self) {
         let needle = self.filter.to_lowercase();
-        self.visible = Arc::new(
-            self.rows
-                .iter()
-                .enumerate()
-                .filter(|(_, row)| {
-                    needle.is_empty()
-                        || row.path.to_string_lossy().to_lowercase().contains(&needle)
-                })
-                .map(|(index, _)| index)
-                .collect(),
-        );
+        let mut visible: Vec<usize> = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                change_matches_filter(row, &needle, self.kind_filter, self.only_staged)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if self.sort_by_kind {
+            visible.sort_unstable_by(|left, right| {
+                let left_row = &self.rows[*left];
+                let right_row = &self.rows[*right];
+                left_row
+                    .kind()
+                    .short_code()
+                    .cmp(right_row.kind().short_code())
+                    .then_with(|| left_row.path.cmp(&right_row.path))
+            });
+        }
+        self.visible = Arc::new(visible);
         self.selected_row = self
             .selected_path
             .as_ref()
@@ -340,6 +406,23 @@ impl Render for ChangesPanel {
         };
         let sidebar_header = sidebar.clone();
         let file_count = rows.len();
+        let kind_filter_button = panel.clone();
+        let staged_filter_button = panel.clone();
+        let sort_button = panel.clone();
+        let kind_filter_label = match self.kind_filter {
+            ChangeKindFilter::All => t!("changes.kind.all"),
+            ChangeKindFilter::Modified => t!("changes.kind.modified"),
+            ChangeKindFilter::Added => t!("changes.kind.added"),
+            ChangeKindFilter::Deleted => t!("changes.kind.deleted"),
+            ChangeKindFilter::Other => t!("changes.kind.other"),
+        };
+        let sort_label = if self.sort_by_kind {
+            t!("changes.sort.status")
+        } else {
+            t!("changes.sort.path")
+        };
+        let staged_only = self.only_staged;
+        let filtered_count = self.visible.len();
 
         let list = uniform_list(
             "changes-flat-list",
@@ -534,6 +617,63 @@ impl Render for ChangesPanel {
             )
             .child(
                 div()
+                    .h_flex()
+                    .w_full()
+                    .h(px(30.))
+                    .px(px(8.))
+                    .gap(px(4.))
+                    .items_center()
+                    .border_b_1()
+                    .border_color(colors.border_variant)
+                    .child(
+                        Button::new("changes-kind-filter", kind_filter_label)
+                            .size(ButtonSize::Compact)
+                            .on_click(move |_, _, cx| {
+                                kind_filter_button
+                                    .update(cx, |panel, cx| {
+                                        panel.kind_filter = panel.kind_filter.next();
+                                        panel.rebuild_filter();
+                                        cx.notify();
+                                    })
+                                    .ok();
+                            }),
+                    )
+                    .child(
+                        Button::new("changes-staged-filter", t!("changes.only_staged"))
+                            .size(ButtonSize::Compact)
+                            .selected(staged_only)
+                            .on_click(move |_, _, cx| {
+                                staged_filter_button
+                                    .update(cx, |panel, cx| {
+                                        panel.only_staged = !panel.only_staged;
+                                        panel.rebuild_filter();
+                                        cx.notify();
+                                    })
+                                    .ok();
+                            }),
+                    )
+                    .child(
+                        Button::new("changes-sort", sort_label)
+                            .size(ButtonSize::Compact)
+                            .on_click(move |_, _, cx| {
+                                sort_button
+                                    .update(cx, |panel, cx| {
+                                        panel.sort_by_kind = !panel.sort_by_kind;
+                                        panel.rebuild_filter();
+                                        cx.notify();
+                                    })
+                                    .ok();
+                            }),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Label::new(format!("{filtered_count}"))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    ),
+            )
+            .child(
+                div()
                     .flex_1()
                     .min_h_0()
                     .w_full()
@@ -605,6 +745,36 @@ mod tests {
             rows[0].toggle_event(),
             SidebarEvent::UnstageFile("x.rs".into())
         );
+    }
+
+    #[test]
+    fn status_and_staged_filters_preserve_partial_staging() {
+        let rows = combine_changes(
+            vec![file("both.rs", FileChangeKind::Modified)],
+            vec![
+                file("both.rs", FileChangeKind::Modified),
+                file("only-new.rs", FileChangeKind::Untracked),
+            ],
+        );
+        assert!(change_matches_filter(
+            &rows[0],
+            "",
+            ChangeKindFilter::Modified,
+            true
+        ));
+        assert!(!change_matches_filter(
+            &rows[1],
+            "",
+            ChangeKindFilter::Modified,
+            false
+        ));
+        assert!(!change_matches_filter(
+            &rows[1],
+            "",
+            ChangeKindFilter::All,
+            true
+        ));
+        assert_eq!(ChangeKindFilter::Other.next(), ChangeKindFilter::All);
     }
 
     #[test]
