@@ -1922,57 +1922,68 @@ impl GraphView {
         }
     }
 
-    /// Jump to the next search match, selecting and scrolling to it.
+    fn filtered_selection_position(&self) -> Option<usize> {
+        let selected_oid = self.selected_oid?;
+        self.filter_matches.iter().position(|index| {
+            self.commits.get(*index).is_some_and(|commit| commit.oid == selected_oid)
+        })
+    }
+
+    fn select_filtered_position(
+        &mut self,
+        position: usize,
+        strategy: ScrollStrategy,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(commit_index) = self.filter_matches.get(position).copied() else {
+            return;
+        };
+        let Some(list_index) = self.list_index_for_commit_index(commit_index) else {
+            return;
+        };
+        self.current_match = position;
+        self.select_list_index(list_index, cx);
+        self.search_results_scroll.scroll_to_item(position, strategy);
+    }
+
+    /// Search next/previous only among visible filtered commits, not hidden
+    /// rows of the underlying graph.
     fn jump_to_next_match(&mut self, cx: &mut Context<Self>) {
-        if self.filter_matches.is_empty() {
+        let count = self.filter_matches.len();
+        if count == 0 {
             return;
         }
-        self.current_match = (self.current_match + 1) % self.filter_matches.len();
-        let commit_index = self.filter_matches[self.current_match];
-        if let Some(list_index) = self.list_index_for_commit_index(commit_index) {
-            self.select_list_index(list_index, cx);
-            self.search_results_scroll
-                .scroll_to_item(self.current_match, ScrollStrategy::Nearest);
-        }
+        let next = self
+            .filtered_selection_position()
+            .map_or(0, |position| (position + 1) % count);
+        self.select_filtered_position(next, ScrollStrategy::Nearest, cx);
     }
 
-    /// Jump to the previous search match.
     fn jump_to_prev_match(&mut self, cx: &mut Context<Self>) {
-        if self.filter_matches.is_empty() {
+        let count = self.filter_matches.len();
+        if count == 0 {
             return;
         }
-        if self.current_match == 0 {
-            self.current_match = self.filter_matches.len() - 1;
-        } else {
-            self.current_match -= 1;
-        }
-        let commit_index = self.filter_matches[self.current_match];
-        if let Some(list_index) = self.list_index_for_commit_index(commit_index) {
-            self.select_list_index(list_index, cx);
-            self.search_results_scroll
-                .scroll_to_item(self.current_match, ScrollStrategy::Nearest);
-        }
+        let previous = self
+            .filtered_selection_position()
+            .map_or(count - 1, |position| (position + count - 1) % count);
+        self.select_filtered_position(previous, ScrollStrategy::Nearest, cx);
     }
 
-    /// Jump to first match after updating the search filter.
-    fn jump_to_first_match(&mut self, cx: &mut Context<Self>) {
-        if !self.filter_matches.is_empty() {
-            self.current_match = 0;
-            let commit_index = self.filter_matches[0];
-            if let Some(list_index) = self.list_index_for_commit_index(commit_index) {
-                self.select_list_index(list_index, cx);
-                self.search_results_scroll
-                    .scroll_to_item(0, ScrollStrategy::Top);
-            }
-        }
+    fn filtering_history(&self, cx: &Context<Self>) -> bool {
+        self.show_search && !self.search_editor.read(cx).is_empty()
     }
 
-    /// Handle key events on the focused search input.
-    /// Moves the selection by one row, scrolling it into view.
-    ///
-    /// The workspace drives this from the `graph::*` actions: this crate sits
-    /// below `rgitui_workspace` in the dependency graph and so cannot name them.
+    /// Moves the selection down one visible row, scrolling it into view.
+    /// The workspace drives this from graph shortcuts.
     pub fn select_next_row(&mut self, cx: &mut Context<Self>) {
+        if self.filtering_history(cx) {
+            let next = self
+                .filtered_selection_position()
+                .map_or(0, |position| position + 1);
+            self.select_filtered_position(next, ScrollStrategy::Center, cx);
+            return;
+        }
         let total = self.total_list_items();
         let next = match self.selected_index {
             Some(index) if index + 1 < total => index + 1,
@@ -1982,8 +1993,15 @@ impl GraphView {
         self.select_row(next, ScrollStrategy::Center, cx);
     }
 
-    /// Moves the selection up one row, scrolling it into view.
     pub fn select_prev_row(&mut self, cx: &mut Context<Self>) {
+        if self.filtering_history(cx) {
+            let previous = self
+                .filtered_selection_position()
+                .and_then(|position| position.checked_sub(1))
+                .unwrap_or(0);
+            self.select_filtered_position(previous, ScrollStrategy::Center, cx);
+            return;
+        }
         let next = match self.selected_index {
             Some(index) if index > 0 => index - 1,
             None if self.total_list_items() > 0 => 0,
@@ -1992,18 +2010,24 @@ impl GraphView {
         self.select_row(next, ScrollStrategy::Center, cx);
     }
 
-    /// Selects the newest commit.
     pub fn select_first_row(&mut self, cx: &mut Context<Self>) {
-        if self.total_list_items() > 0 {
+        if self.filtering_history(cx) {
+            self.select_filtered_position(0, ScrollStrategy::Top, cx);
+        } else if self.total_list_items() > 0 {
             self.select_row(0, ScrollStrategy::Top, cx);
         }
     }
 
-    /// Selects the oldest loaded commit.
     pub fn select_last_row(&mut self, cx: &mut Context<Self>) {
-        let total = self.total_list_items();
-        if total > 0 {
-            self.select_row(total - 1, ScrollStrategy::Center, cx);
+        if self.filtering_history(cx) {
+            if let Some(last) = self.filter_matches.len().checked_sub(1) {
+                self.select_filtered_position(last, ScrollStrategy::Center, cx);
+            }
+        } else {
+            let total = self.total_list_items();
+            if total > 0 {
+                self.select_row(total - 1, ScrollStrategy::Center, cx);
+            }
         }
     }
 
@@ -3485,10 +3509,17 @@ impl Render for GraphView {
                                         ),
                                 )
                                 .child(
-                                    Label::new(author)
-                                        .size(LabelSize::XSmall)
-                                        .color(Color::Muted)
-                                        .truncate(),
+                                    div()
+                                        .w(px(108.))
+                                        .min_w_0()
+                                        .flex_shrink_0()
+                                        .overflow_hidden()
+                                        .child(
+                                            Label::new(author)
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Muted)
+                                                .truncate(),
+                                        ),
                                 )
                                 .child(
                                     Label::new(sha)
