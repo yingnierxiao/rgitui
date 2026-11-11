@@ -3094,7 +3094,7 @@ pub(super) fn subscribe_commit_panel(
                                 }
                             }
                         }
-                    })?;
+                    });
                     anyhow::Ok(())
                 })
                 .detach();
