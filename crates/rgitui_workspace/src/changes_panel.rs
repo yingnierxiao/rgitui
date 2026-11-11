@@ -960,6 +960,8 @@ impl Render for ChangesPanel {
                         let weak_panel = panel.clone();
                         let path_tooltip = file_path.clone();
                         let row_click_path = row.path.clone();
+                        let context_menu_path = row.path.clone();
+                        let weak_panel_context = panel.clone();
                         let checkbox_click_path = row.path.clone();
                         let row_bg = row_colors.ghost_element_selected;
                         let row_hover = row_colors.ghost_element_hover;
@@ -980,6 +982,28 @@ impl Render for ChangesPanel {
                             })
                             .hover(move |el| el.bg(row_hover))
                             .cursor_pointer()
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                move |event: &MouseDownEvent, _: &mut Window, cx: &mut App| {
+                                    cx.stop_propagation();
+                                    weak_panel_context
+                                        .update(cx, |this, cx| {
+                                            this.select_visible_path(
+                                                &context_menu_path,
+                                                row_number,
+                                                false,
+                                                false,
+                                                cx,
+                                            );
+                                            this.context_menu = Some(ChangesContextMenuState {
+                                                path: context_menu_path.clone(),
+                                                position: event.position,
+                                            });
+                                            cx.notify();
+                                        })
+                                        .ok();
+                                },
+                            )
                             .on_click(move |event: &ClickEvent, window: &mut Window, cx: &mut App| {
                                 let modifiers = event.modifiers();
                                 weak_panel
@@ -1401,7 +1425,6 @@ impl Render for ChangesPanel {
                     },
                 ));
 
-                let weak = weak_panel.clone();
                 let menu_overlay = div()
                     .id("changes-file-context-menu")
                     .absolute()
@@ -1414,7 +1437,6 @@ impl Render for ChangesPanel {
                         cx.notify();
                     }))
                     .child(menu);
-                let _ = weak;
                 panel = panel.child(menu_overlay);
             }
         }
