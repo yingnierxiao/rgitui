@@ -192,6 +192,41 @@ fn can_discard_to_head(row: &ChangeRow) -> bool {
     row.unstaged.is_some() && row.staged.is_none()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ChangeContextMenuActions {
+    conflict: bool,
+    staged_diff: bool,
+    stage: bool,
+    unstage: bool,
+    discard: bool,
+}
+
+impl ChangeContextMenuActions {
+    fn for_row(row: &ChangeRow) -> Self {
+        let conflict = row.has_conflict();
+        Self {
+            conflict,
+            staged_diff: !conflict && row.staged_preview_event().is_some(),
+            stage: !conflict && row.unstaged.is_some(),
+            unstage: !conflict && row.staged.is_some(),
+            discard: !conflict && can_discard_to_head(row),
+        }
+    }
+
+    fn height(self) -> f32 {
+        // Open (or conflict resolver), copy path, plus the conditional actions.
+        let item_count = 2
+            + usize::from(self.staged_diff)
+            + usize::from(self.stage)
+            + usize::from(self.unstage)
+            + usize::from(self.discard);
+        // Copy-path separator, plus separators before Stage and Discard.
+        let separator_count =
+            1 + usize::from(self.stage) + usize::from(self.discard);
+        8.0 + item_count as f32 * 28.0 + separator_count as f32 * 9.0
+    }
+}
+
 fn change_matches_filter(
     row: &ChangeRow,
     needle: &str,
@@ -685,7 +720,7 @@ impl ChangesPanel {
         for path in paths {
             if let Ok(index) = self.rows.binary_search_by(|row| row.path.cmp(path)) {
                 let row = &self.rows[index];
-                if row.has_conflict() {
+                if actions.conflict {
                     continue;
                 }
                 let previous = visual_state(row, &self.overrides);
@@ -1334,27 +1369,8 @@ impl Render for ChangesPanel {
 
         if let Some(menu_state) = self.context_menu.clone() {
             let row = self.rows.iter().find(|row| row.path == menu_state.path).cloned();
-            let menu_height = row.as_ref().map_or(0.0, |row| {
-                let mut item_count = 2; // Open (or conflict resolver) + copy path.
-                let mut separator_count = 1; // Separator before copy path.
-                if !row.has_conflict() {
-                    if row.staged_preview_event().is_some() {
-                        item_count += 1;
-                    }
-                    if row.unstaged.is_some() {
-                        item_count += 1;
-                        separator_count += 1;
-                    }
-                    if row.staged.is_some() {
-                        item_count += 1;
-                    }
-                    if can_discard_to_head(row) {
-                        item_count += 1;
-                        separator_count += 1;
-                    }
-                }
-                8.0 + item_count as f32 * 28.0 + separator_count as f32 * 9.0
-            });
+            let actions = row.as_ref().map(ChangeContextMenuActions::for_row);
+            let menu_height = actions.map_or(0.0, ChangeContextMenuActions::height);
             let menu_size = Size::new(
                 px(CHANGE_CONTEXT_MENU_WIDTH),
                 px(menu_height),
@@ -1369,7 +1385,7 @@ impl Render for ChangesPanel {
             let weak_panel = cx.weak_entity();
             let weak_sidebar = self.sidebar.clone();
 
-            if let Some(row) = row {
+            if let (Some(row), Some(actions)) = (row, actions) {
                 let mut menu = ContextMenu::new().min_width(CHANGE_CONTEXT_MENU_WIDTH);
 
                 if row.has_conflict() {
@@ -1413,7 +1429,7 @@ impl Render for ChangesPanel {
                         ),
                     );
 
-                    if let Some(staged_event) = row.staged_preview_event() {
+                    if let Some(staged_event) = actions.staged_diff.then(|| row.staged_preview_event()).flatten() {
                         let panel = weak_panel.clone();
                         let sidebar = weak_sidebar.clone();
                         menu = menu.item(
@@ -1433,7 +1449,7 @@ impl Render for ChangesPanel {
                         );
                     }
 
-                    if row.unstaged.is_some() {
+                    if actions.stage {
                         let sidebar = weak_sidebar.clone();
                         let panel = weak_panel.clone();
                         let path = row.path.to_string_lossy().to_string();
@@ -1456,7 +1472,7 @@ impl Render for ChangesPanel {
                         );
                     }
 
-                    if row.staged.is_some() {
+                    if actions.unstage {
                         let sidebar = weak_sidebar.clone();
                         let panel = weak_panel.clone();
                         let path = row.path.to_string_lossy().to_string();
@@ -1483,7 +1499,7 @@ impl Render for ChangesPanel {
                     // would erase staged content too. Offer it only when the
                     // file has no staged side; partially staged files can be
                     // unstaged first, then safely discarded.
-                    if can_discard_to_head(&row) {
+                    if actions.discard {
                         let sidebar = weak_sidebar.clone();
                         let panel = weak_panel.clone();
                         let path = row.path.to_string_lossy().to_string();
@@ -1781,6 +1797,54 @@ mod tests {
             visual_header_state(&rows, &[0, 1, 2], &overrides),
             CheckState::Indeterminate
         );
+    }
+
+    #[test]
+    fn context_menu_actions_match_each_git_change_state() {
+        let unstaged = ChangeRow {
+            path: PathBuf::from("unstaged.rs"),
+            staged: None,
+            unstaged: Some(file("unstaged.rs", FileChangeKind::Modified)),
+        };
+        let staged = ChangeRow {
+            path: PathBuf::from("staged.rs"),
+            staged: Some(file("staged.rs", FileChangeKind::Modified)),
+            unstaged: None,
+        };
+        let partial = ChangeRow {
+            path: PathBuf::from("partial.rs"),
+            staged: Some(file("partial.rs", FileChangeKind::Modified)),
+            unstaged: Some(file("partial.rs", FileChangeKind::Modified)),
+        };
+        let conflict = ChangeRow {
+            path: PathBuf::from("conflict.rs"),
+            staged: None,
+            unstaged: Some(file("conflict.rs", FileChangeKind::Conflicted)),
+        };
+
+        let unstaged_actions = ChangeContextMenuActions::for_row(&unstaged);
+        assert!(unstaged_actions.stage);
+        assert!(unstaged_actions.discard);
+        assert!(!unstaged_actions.unstage);
+        assert!(unstaged_actions.height() > 0.0);
+
+        let staged_actions = ChangeContextMenuActions::for_row(&staged);
+        assert!(staged_actions.unstage);
+        assert!(!staged_actions.stage);
+        assert!(!staged_actions.discard);
+
+        let partial_actions = ChangeContextMenuActions::for_row(&partial);
+        assert!(partial_actions.stage);
+        assert!(partial_actions.unstage);
+        assert!(partial_actions.staged_diff);
+        assert!(!partial_actions.discard);
+
+        let conflict_actions = ChangeContextMenuActions::for_row(&conflict);
+        assert!(conflict_actions.conflict);
+        assert!(!conflict_actions.stage);
+        assert!(!conflict_actions.unstage);
+        assert!(!conflict_actions.discard);
+        assert!(!conflict_actions.staged_diff);
     }
 
     #[test]
