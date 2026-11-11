@@ -15,9 +15,25 @@ pub(crate) fn batch_diff_stats(
     repo: &Repository,
     staged: bool,
 ) -> std::collections::HashMap<PathBuf, (usize, usize)> {
+    batch_diff_stats_for_paths(repo, staged, &[])
+}
+
+/// Calculate only the requested files for the first, visible-priority stats
+/// pass. Empty `paths` means the original full diff-stat calculation.
+pub(crate) fn batch_diff_stats_for_paths(
+    repo: &Repository,
+    staged: bool,
+    paths: &[PathBuf],
+) -> std::collections::HashMap<PathBuf, (usize, usize)> {
     let batch_timer = std::time::Instant::now();
-    log::debug!("batch_diff_stats: staged={}", staged);
+    log::debug!("batch_diff_stats: staged={} paths={}", staged, paths.len());
     let mut opts = DiffOptions::new();
+    if !paths.is_empty() {
+        opts.disable_pathspec_match(true);
+        for path in paths {
+            opts.pathspec(path);
+        }
+    }
     // Untracked files/directories are represented by status rows and expanded
     // separately. Including them here would recursively walk large directories
     // just to compute optional line counts.
@@ -2109,6 +2125,19 @@ mod diff_integration_tests {
         let (adds, dels) = stats[Path::new("data.txt")];
         assert_eq!(adds, 1, "one line added");
         assert_eq!(dels, 1, "one line deleted");
+    }
+
+    #[test]
+    fn batch_diff_stats_only_calculates_requested_literal_paths() {
+        let fixture = TempRepo::init();
+        fixture.commit_file("bracket[1].txt", "before\n", "init");
+        fixture.commit_file("other.txt", "old\n", "other");
+        std::fs::write(fixture.path().join("bracket[1].txt"), "after\n").unwrap();
+        std::fs::write(fixture.path().join("other.txt"), "new\n").unwrap();
+        let selected = vec![PathBuf::from("bracket[1].txt")];
+        let stats = batch_diff_stats_for_paths(fixture.repo(), false, &selected);
+        assert!(stats.contains_key(Path::new("bracket[1].txt")));
+        assert!(!stats.contains_key(Path::new("other.txt")));
     }
 
     #[test]
