@@ -1053,6 +1053,24 @@ pub(super) fn subscribe_project(cx: &mut Context<Workspace>, subs: ProjectSubscr
 
     cx.subscribe(project, {
         move |this, project, event: &GitProjectEvent, cx| match event {
+            GitProjectEvent::LineStatsUpdated => {
+                // Updating line counts is not a Git status/refs change. Avoid
+                // re-rendering the commit graph, author avatars and prewarm
+                // tasks every time the visible/full statistics phase finishes.
+                if let Some(tab) = this.tabs.iter().find(|tab| tab.project == project) {
+                    let (status, path) = {
+                        let proj = project.read(cx);
+                        active_worktree_status(tab, proj)
+                    };
+                    tab.changes_panel.update(cx, |panel, cx| {
+                        panel.set_worktree(path, cx);
+                        panel.update_status(status.staged.clone(), status.unstaged.clone(), cx);
+                    });
+                    tab.sidebar.update(cx, |sidebar, cx| {
+                        sidebar.update_status(status.staged, status.unstaged, cx);
+                    });
+                }
+            }
             GitProjectEvent::AheadBehindRefreshed => {
                 // `is_head` is the branch the *main* checkout has out. Reading
                 // it here would undo the inspected worktree's own counts every
@@ -1338,6 +1356,19 @@ pub(super) fn subscribe_project(cx: &mut Context<Workspace>, subs: ProjectSubscr
                         diff_prefetch.enqueue(repo_path, prewarm_oids, cx);
                     }
                 } // end prewarm gate
+
+                // Delay expensive line counts until the file list is already
+                // interactive. The first pass targets files currently shown by
+                // this tab; the remaining counts arrive in the background.
+                if let Some(tab) = this.tabs.iter().find(|tab| tab.project == project) {
+                    let priority_worktree = tab.effective_repo_path(cx);
+                    let paths = tab.changes_panel.read(cx).priority_stats_paths(24);
+                    project.update(cx, |proj, cx| {
+                        proj.schedule_deferred_line_stats(
+                            priority_worktree, paths, cx,
+                        );
+                    });
+                }
             }
             GitProjectEvent::OperationUpdated(update) => {
                 let is_running = update.state == GitOperationState::Running;
