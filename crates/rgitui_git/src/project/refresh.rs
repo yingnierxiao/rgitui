@@ -689,7 +689,7 @@ fn status_fingerprint(repo_path: &Path, statuses: &git2::Statuses<'_>, line_stat
     // A status cached without line counts must not be served once they are
     // wanted, and the reverse.
     line_stats.hash(&mut hasher);
-    let mut read_from_disk =
+    let read_from_disk =
         git2::Status::WT_MODIFIED | git2::Status::WT_RENAMED | git2::Status::WT_TYPECHANGE;
     for entry in statuses.iter() {
         let path = entry.path().unwrap_or("");
