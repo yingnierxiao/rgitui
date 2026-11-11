@@ -69,6 +69,7 @@ impl Workspace {
         let submodule_view = cx.new(crate::SubmoduleView::new);
         let detail_panel = cx.new(crate::DetailPanel::new);
         let sidebar = cx.new(crate::Sidebar::new);
+        let changes_panel = cx.new(|cx| crate::ChangesPanel::new(sidebar.downgrade(), cx));
         let commit_panel = cx.new(crate::CommitPanel::new);
         let toolbar = cx.new(|_cx| crate::Toolbar::new());
         let global_search_view = cx.new(crate::GlobalSearchView::new);
@@ -77,6 +78,7 @@ impl Workspace {
         let repo_display_name = project.read(cx).repo_name().to_string();
         sidebar.update(cx, |s, cx| {
             s.set_repo_name(repo_display_name, cx);
+            s.set_show_change_sections(false, cx);
         });
 
         let caches = super::ViewCaches::new();
@@ -182,6 +184,14 @@ impl Workspace {
                 s.set_selected_worktree_by_path(Some(&selected_worktree_path), cx);
             });
 
+            changes_panel.update(cx, |panel, cx| {
+                panel.set_worktree(selected_worktree_path, cx);
+                panel.update_status(
+                    init_status.staged.clone(),
+                    init_status.unstaged.clone(),
+                    cx,
+                );
+            });
             commit_panel.update(cx, |cp, cx| cp.set_staged_count(staged_count, cx));
         }
 
@@ -221,6 +231,7 @@ impl Workspace {
             submodule_view,
             detail_panel,
             sidebar,
+            changes_panel,
             commit_panel,
             toolbar,
             issues_panel,

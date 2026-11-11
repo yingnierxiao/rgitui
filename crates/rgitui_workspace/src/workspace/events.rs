@@ -270,6 +270,10 @@ pub(super) fn update_sidebar_for_active_worktree(
         sidebar.update_status(status.staged.clone(), status.unstaged.clone(), cx);
         sidebar.set_selected_worktree_by_path(Some(&selected_path), cx);
     });
+    tab.changes_panel.update(cx, |panel, cx| {
+        panel.set_worktree(selected_path, cx);
+        panel.update_status(status.staged.clone(), status.unstaged.clone(), cx);
+    });
     update_commit_panel_for_active_worktree(workspace, cx);
     update_toolbar_for_active_worktree(workspace, cx);
 }
@@ -1488,6 +1492,11 @@ pub(super) fn subscribe_sidebar(
                 let directory_label = path.clone();
                 let repo_path = this.effective_worktree_path(cx);
                 let sidebar = _sidebar.clone();
+                let changes_panel = this
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.project == project)
+                    .map(|tab| tab.changes_panel.clone());
                 cx.spawn(async move |_, cx: &mut gpui::AsyncApp| {
                     let result = cx
                         .background_executor()
@@ -1497,9 +1506,19 @@ pub(super) fn subscribe_sidebar(
                         .await;
                     match result {
                         Ok(children) => {
+                            let flat_children = children.clone();
                             sidebar.update(cx, |sidebar, cx| {
                                 sidebar.expand_untracked_directory(&directory_label, children, cx);
                             });
+                            if let Some(changes_panel) = changes_panel {
+                                changes_panel.update(cx, |panel, cx| {
+                                    panel.expand_untracked_directory(
+                                        std::path::Path::new(&directory_label),
+                                        flat_children,
+                                        cx,
+                                    );
+                                });
+                            }
                         }
                         Err(error) => {
                             log::warn!(

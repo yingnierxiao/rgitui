@@ -343,6 +343,8 @@ fn stash_menu_size() -> Size<Pixels> {
 /// The left sidebar panel with branches, tags, stashes, and working tree status.
 pub struct Sidebar {
     expanded_sections: Vec<SidebarSection>,
+    /// The normal workspace shows changed files in the flat ChangesPanel.
+    show_change_sections: bool,
     tags: Vec<TagInfo>,
     remotes: Vec<RemoteInfo>,
     stashes: Vec<StashEntry>,
@@ -545,6 +547,7 @@ impl Sidebar {
 
         Self {
             expanded_sections,
+            show_change_sections: true,
             tags: Vec::new(),
             remotes: Vec::new(),
             stashes: Vec::new(),
@@ -755,8 +758,12 @@ impl Sidebar {
             }
         }
 
-        items.push(SidebarItem::SectionHeader(SidebarSection::StagedChanges));
-        if is_expanded(SidebarSection::StagedChanges, &self.expanded_sections) {
+        if self.show_change_sections {
+            items.push(SidebarItem::SectionHeader(SidebarSection::StagedChanges));
+        }
+        if self.show_change_sections
+            && is_expanded(SidebarSection::StagedChanges, &self.expanded_sections)
+        {
             for item in &self.flattened_staged {
                 match item {
                     FlatFileItem::File { file_idx, .. } => {
@@ -769,8 +776,12 @@ impl Sidebar {
             }
         }
 
-        items.push(SidebarItem::SectionHeader(SidebarSection::UnstagedChanges));
-        if is_expanded(SidebarSection::UnstagedChanges, &self.expanded_sections) {
+        if self.show_change_sections {
+            items.push(SidebarItem::SectionHeader(SidebarSection::UnstagedChanges));
+        }
+        if self.show_change_sections
+            && is_expanded(SidebarSection::UnstagedChanges, &self.expanded_sections)
+        {
             for item in &self.flattened_unstaged {
                 match item {
                     FlatFileItem::File { file_idx, .. } => {
@@ -1185,10 +1196,25 @@ impl Sidebar {
         }) {
             self.selected_file = None;
         }
-        self.rebuild_change_trees();
+        if self.show_change_sections {
+            self.rebuild_change_trees();
+        }
         self.rebuild_flattened_branches();
         self.rebuild_nav_items();
         cx.notify();
+    }
+
+    /// Keep repository navigation independent from staging controls. Callers
+    /// can still enable the original tree mode for specialized views.
+    pub fn set_show_change_sections(&mut self, show: bool, cx: &mut Context<Self>) {
+        if self.show_change_sections != show {
+            self.show_change_sections = show;
+            if show {
+                self.rebuild_change_trees();
+            }
+            self.rebuild_nav_items();
+            cx.notify();
+        }
     }
 
     pub fn update_status(
@@ -1207,7 +1233,9 @@ impl Sidebar {
         }
         self.staged = staged;
         self.unstaged = unstaged;
-        self.rebuild_change_trees();
+        if self.show_change_sections {
+            self.rebuild_change_trees();
+        }
 
         self.rebuild_flattened_branches();
 
@@ -1613,7 +1641,11 @@ impl Sidebar {
     /// the repo header, the eight section headers, placeholder rows of
     /// expanded-but-empty sections, and the separator.
     fn chrome_height(&self, item_h: f32, header_h: f32) -> f32 {
-        let mut chrome = header_h + 8.0 * item_h + SIDEBAR_SEPARATOR_HEIGHT;
+        let section_count = if self.show_change_sections { 8.0 } else { 6.0 };
+        let mut chrome = header_h + section_count * item_h;
+        if self.show_change_sections {
+            chrome += SIDEBAR_SEPARATOR_HEIGHT;
+        }
 
         let placeholders = [
             (
@@ -1632,7 +1664,14 @@ impl Sidebar {
             (SidebarSection::UnstagedChanges, self.unstaged.is_empty()),
         ];
         for (section, is_empty) in placeholders {
-            if is_empty && self.is_expanded(section) {
+            if is_empty
+                && self.is_expanded(section)
+                && (self.show_change_sections
+                    || !matches!(
+                        section,
+                        SidebarSection::StagedChanges | SidebarSection::UnstagedChanges
+                    ))
+            {
                 chrome += SIDEBAR_EMPTY_ROW_HEIGHT;
             }
         }
@@ -1651,7 +1690,13 @@ impl Sidebar {
         compactness: Compactness,
     ) -> SidebarListHeights {
         let rows = |section: SidebarSection, count: usize| -> f32 {
-            if !self.is_expanded(section) {
+            if !self.is_expanded(section)
+                || (!self.show_change_sections
+                    && matches!(
+                        section,
+                        SidebarSection::StagedChanges | SidebarSection::UnstagedChanges
+                    ))
+            {
                 return 0.0;
             }
             let visible = section_row_cap(section, compactness).map_or(count, |cap| count.min(cap));
@@ -3707,6 +3752,8 @@ impl Render for Sidebar {
             }
         }
 
+        // The legacy file trees are hidden in navigation-only mode.
+        if self.show_change_sections {
         // Separator between refs and file changes
         content = content.child(div().w_full().h(px(1.)).my(px(4.)).bg(colors.border));
 
@@ -4454,6 +4501,8 @@ impl Render for Sidebar {
                 content = content.child(list);
             }
         }
+
+        } // end of optional staged/unstaged file trees
 
         // Build scroll div and context menu (if open), then return panel.
         let scroll_div = div()

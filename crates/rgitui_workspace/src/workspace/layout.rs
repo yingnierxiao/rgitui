@@ -866,7 +866,55 @@ impl Render for Workspace {
                             .when(sidebar_focused, |el| {
                                 el.border_t_2().border_color(focus_accent)
                             })
-                            .child(active_tab.sidebar.clone().cached(fill_container()))
+                            // Keep repository navigation above commit metadata.
+                            // Changed-file staging moved to the right panel.
+                            .child(
+                                div()
+                                    .v_flex()
+                                    .w_full()
+                                    .h_full()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_h_0()
+                                            .child(active_tab.sidebar.clone().cached(fill_container())),
+                                    )
+                                    .child(
+                                        div()
+                                            .v_flex()
+                                            .h(px(260.))
+                                            .flex_shrink_0()
+                                            .border_t_1()
+                                            .border_color(colors.border_variant)
+                                            .when(detail_focused, |el| {
+                                                el.border_t_2().border_color(focus_accent)
+                                            })
+                                            .child(
+                                                div()
+                                                    .h_flex()
+                                                    .h(px(26.))
+                                                    .px(px(8.))
+                                                    .items_center()
+                                                    .bg(colors.toolbar_background)
+                                                    .child(
+                                                        Label::new(t!("common.details"))
+                                                            .size(LabelSize::XSmall)
+                                                            .weight(gpui::FontWeight::SEMIBOLD),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_h_0()
+                                                    .child(
+                                                        active_tab
+                                                            .detail_panel
+                                                            .clone()
+                                                            .cached(fill_container()),
+                                                    ),
+                                            ),
+                                    ),
+                            )
                             // Resize handle straddles the right border
                             .child(
                                 div()
@@ -1251,7 +1299,7 @@ impl Render for Workspace {
                                     })
                             }),
                     )
-                    // Right panel: detail + resize handle + commit input
+                    // Right panel: flat changes list + resize handle + commit input
                     .child({
                         let commit_panel_collapsed =
                             active_tab.commit_panel.read(cx).is_collapsed();
@@ -1330,7 +1378,7 @@ impl Render for Workspace {
                                                     .ok();
                                             })
                                             .child(
-                                                Label::new(t!("common.details"))
+                                                Label::new(t!("changes.tab"))
                                                     .size(LabelSize::XSmall)
                                                     .weight(gpui::FontWeight::SEMIBOLD)
                                                     .color(if is_details {
@@ -1480,7 +1528,7 @@ impl Render for Workspace {
                                         |el| {
                                             el.child(
                                                 active_tab
-                                                    .detail_panel
+                                                    .changes_panel
                                                     .clone()
                                                     .cached(fill_container()),
                                             )

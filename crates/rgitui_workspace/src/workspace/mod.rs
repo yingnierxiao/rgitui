@@ -180,6 +180,7 @@ pub(super) struct ProjectTab {
     pub submodule_view: Entity<crate::SubmoduleView>,
     pub detail_panel: Entity<crate::DetailPanel>,
     pub sidebar: Entity<crate::Sidebar>,
+    pub changes_panel: Entity<crate::ChangesPanel>,
     pub commit_panel: Entity<crate::CommitPanel>,
     pub toolbar: Entity<crate::Toolbar>,
     pub issues_panel: Entity<crate::IssuesPanel>,

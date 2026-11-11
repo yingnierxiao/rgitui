@@ -6,6 +6,7 @@ mod stashes_panel;
 
 mod branch_health_panel;
 mod cache;
+mod changes_panel;
 mod command_palette;
 mod commit_panel;
 mod confirm_dialog;
@@ -50,6 +51,7 @@ pub use branch_dialog::*;
 pub use stashes_panel::*;
 
 pub use branch_health_panel::*;
+pub use changes_panel::*;
 pub use command_palette::*;
 pub use commit_panel::*;
 pub use confirm_dialog::*;
