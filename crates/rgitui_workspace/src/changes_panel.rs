@@ -157,7 +157,10 @@ fn bulk_toggle_for_visible(
         CheckState::Unchecked
     };
 
-    let action = if visible.len() == rows.len() {
+    // Conflict rows are never valid toggle targets. Even with no text
+    // filter, a bulk operation must not implicitly reset those index entries.
+    let restricted = visible.len() != rows.len() || selectable.len() != rows.len();
+    let action = if !restricted {
         if all_checked {
             SidebarEvent::UnstageAll
         } else {
@@ -866,7 +869,7 @@ mod tests {
         );
         assert_eq!(
             bulk_toggle_for_visible(&rows, &[0, 1]).1,
-            Some(SidebarEvent::StageAll)
+            Some(SidebarEvent::StageFiles(vec!["normal.rs".into()]))
         );
     }
 
