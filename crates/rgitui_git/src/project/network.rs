@@ -118,6 +118,29 @@ fn push_with_auto_pull(
                 )
             })?;
 
+            // Distinguish a genuine concurrent remote push from a local
+            // integration problem. Git's FETCH_HEAD is what the pull merged,
+            // not necessarily the remote-tracking branch's previous tip.
+            if let Ok(repo) = open_worktree_repo(worktree) {
+                let head = repo.head().ok().and_then(|reference| reference.target());
+                let fetched = repo.revparse_single("FETCH_HEAD").ok().map(|obj| obj.id());
+                if let (Some(head), Some(fetched)) = (head, fetched) {
+                    let integrated = head == fetched
+                        || repo.graph_descendant_of(head, fetched).unwrap_or(false);
+                    log::info!(
+                        "push auto-pull ancestry: head={} fetch_head={} integrated={} remote={} branch={}",
+                        head, fetched, integrated, remote, remote_branch
+                    );
+                    if !integrated {
+                        log::warn!(
+                            "automatic pull reported success but HEAD does not contain FETCH_HEAD; retry may be rejected"
+                        );
+                    }
+                } else {
+                    log::debug!("push auto-pull ancestry: FETCH_HEAD/HEAD unavailable");
+                }
+            }
+
             // Retry exactly once. A second rejection may mean a concurrent
             // remote update; never loop indefinitely or silently force.
             let retry_started = std::time::Instant::now();
@@ -800,6 +823,7 @@ impl GitProject {
                                 remote_branch = &task_remote_branch_name
                             )
                         };
+                        let refresh_started = std::time::Instant::now();
                         let data = if pulled {
                             refresh_caches.mark_worktree_status_dirty(&task_worktree_path);
                             gather_refresh_data_lightweight_cached(
@@ -811,20 +835,31 @@ impl GitProject {
                         } else {
                             gather_refresh_data(&repo_path, commit_limit)?
                         };
+                        log::info!(
+                            "push timing: post-operation refresh completed in {:?} auto_pulled={}",
+                            refresh_started.elapsed(),
+                            pulled
+                        );
                         Ok((msg, details, data))
                     })();
 
                     // A failed automatic merge may have changed the working tree
                     // and index. Refresh even on failure so conflict UI is live.
                     let failure_refresh = if result.is_err() && pulled {
+                        let failure_started = std::time::Instant::now();
                         refresh_caches.mark_worktree_status_dirty(&task_worktree_path);
-                        gather_refresh_data_lightweight_cached(
+                        let refreshed = gather_refresh_data_lightweight_cached(
                             &repo_path,
                             commit_limit,
                             &refresh_caches,
                             author_filter.as_deref(),
-                        )
-                        .ok()
+                        );
+                        log::info!(
+                            "push timing: refresh after failed auto-pull/retry completed in {:?} result={}",
+                            failure_started.elapsed(),
+                            if refreshed.is_ok() { "success" } else { "failed" }
+                        );
+                        refreshed.ok()
                     } else {
                         None
                     };
