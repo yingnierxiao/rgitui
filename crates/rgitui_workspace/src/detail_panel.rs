@@ -695,6 +695,16 @@ impl DetailPanel {
             &self.diff_source,
         ) {
             if let Some(file) = diff.files.get(idx) {
+                log::info!(
+                    "history file selection: path={} index={} files={} hunks={} +{} -{} source={:?}",
+                    file.path.display(),
+                    idx,
+                    diff.files.len(),
+                    file.hunks.len(),
+                    file.additions,
+                    file.deletions,
+                    source
+                );
                 cx.emit(DetailPanelEvent::FileSelected(
                     file.clone(),
                     file.path.to_string_lossy().to_string(),
@@ -966,6 +976,7 @@ impl DetailPanel {
             .compactness
             .spacing(26.0);
         let selected_file_index = self.selected_file_index;
+        let displayed_commit = self.commit.as_ref().map(|commit| commit.oid);
         let weak = cx.weak_entity();
         let row_count = filtered.len();
         let list_height = file_list_content_height(row_count, row_h);
@@ -1020,6 +1031,12 @@ impl DetailPanel {
                             .cursor_pointer()
                             .on_click(move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
                                 weak.update(cx, |this, cx| {
+                                    if this.commit.as_ref().map(|commit| commit.oid)
+                                        != displayed_commit
+                                    {
+                                        log::debug!("history file click ignored: commit changed during render");
+                                        return;
+                                    }
                                     this.selected_file_index = Some(actual_file_index);
                                     this.emit_file_selected(cx);
                                     cx.notify();
@@ -1111,6 +1128,7 @@ impl DetailPanel {
             .compactness
             .spacing(26.0);
         let selected_file_index = self.selected_file_index;
+        let displayed_commit = self.commit.as_ref().map(|commit| commit.oid);
         let collapsed = self.collapsed_dirs.clone();
         let weak = cx.weak_entity();
         let row_count = visible.len();
@@ -1211,6 +1229,12 @@ impl DetailPanel {
                                     .on_click(
                                         move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
                                             weak.update(cx, |this, cx| {
+                                                if this.commit.as_ref().map(|commit| commit.oid)
+                                                    != displayed_commit
+                                                {
+                                                    log::debug!("history tree file click ignored: commit changed during render");
+                                                    return;
+                                                }
                                                 this.selected_file_index = Some(actual_file_index);
                                                 this.emit_file_selected(cx);
                                                 cx.notify();
