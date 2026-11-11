@@ -24,6 +24,38 @@ use super::{ensure_clean_worktree, head_branch_name, GitProject, GitProjectEvent
 //  - BUG-41: `discard_changes_at` directory handling — verifier judged the current
 //    code correct (untracked dirs take the remove_dir_all branch); left unchanged.
 
+/// Stage all tracked modifications/deletions and untracked files while
+/// keeping unresolved merge entries intact.
+///
+/// `add_all` alone only walks files still present on disk; update_all first
+/// removes deleted tracked paths from the index, matching `git add -A`.
+fn stage_all_in_repo(repo: &Repository) -> Result<()> {
+    let mut index = repo.index()?;
+    let conflicted = index
+        .conflicts()?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            entry
+                .our
+                .as_ref()
+                .or(entry.their.as_ref())
+                .or(entry.ancestor.as_ref())
+                .map(|entry| entry.path.clone())
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let mut skip_conflicts = |path: &Path, _matched: &[u8]| {
+        i32::from(conflicted.contains(path.as_os_str().as_encoded_bytes()))
+    };
+    index.update_all(["*"].iter(), Some(&mut skip_conflicts))?;
+    index.add_all(
+        ["*"].iter(),
+        git2::IndexAddOption::DEFAULT,
+        Some(&mut skip_conflicts),
+    )?;
+    index.write()?;
+    Ok(())
+}
+
 /// Unstage selected paths without modifying the working directory.
 ///
 /// git_reset_default requires a commit-ish target, not the HEAD tree.
@@ -455,28 +487,7 @@ impl GitProject {
                 .background_executor()
                 .spawn(async move {
                     let repo = Repository::open(&worktree_path)?;
-                    let mut index = repo.index()?;
-                    let conflicted = index
-                        .conflicts()?
-                        .filter_map(|entry| entry.ok())
-                        .filter_map(|entry| {
-                            entry
-                                .our
-                                .as_ref()
-                                .or(entry.their.as_ref())
-                                .or(entry.ancestor.as_ref())
-                                .map(|entry| entry.path.clone())
-                        })
-                        .collect::<std::collections::HashSet<_>>();
-                    let mut skip_conflicts = |path: &Path, _matched: &[u8]| {
-                        i32::from(conflicted.contains(path.as_os_str().as_encoded_bytes()))
-                    };
-                    index.add_all(
-                        ["*"].iter(),
-                        git2::IndexAddOption::DEFAULT,
-                        Some(&mut skip_conflicts),
-                    )?;
-                    index.write()?;
+                    stage_all_in_repo(&repo)?;
                     worktree_cache.mark_worktree_status_dirty(&worktree_path);
                     gather_refresh_data_lightweight_cached(
                         &refresh_repo_path,
@@ -7268,6 +7279,48 @@ mod tests {
 
     /// A repo whose single commit has an empty tree, so a test is free to create
     /// and stage `file.txt` itself without colliding with an existing entry.
+    #[test]
+    fn stage_all_includes_deleted_tracked_files() {
+        let fixture = TempRepo::init();
+        fixture.write_file("removed.txt", "tracked\n");
+        fixture.stage("removed.txt");
+        fixture.commit("initial");
+        std::fs::remove_file(fixture.path().join("removed.txt")).unwrap();
+
+        super::stage_all_in_repo(fixture.repo()).unwrap();
+
+        assert!(fixture
+            .repo()
+            .index()
+            .unwrap()
+            .get_path(std::path::Path::new("removed.txt"), 0)
+            .is_none());
+        assert!(fixture
+            .repo()
+            .head()
+            .unwrap()
+            .peel_to_tree()
+            .unwrap()
+            .get_path(std::path::Path::new("removed.txt"))
+            .is_ok());
+    }
+
+    #[test]
+    fn stage_all_includes_new_untracked_files() {
+        let fixture = TempRepo::init();
+        fixture.commit("initial");
+        fixture.write_file("added.txt", "new\n");
+
+        super::stage_all_in_repo(fixture.repo()).unwrap();
+
+        assert!(fixture
+            .repo()
+            .index()
+            .unwrap()
+            .get_path(std::path::Path::new("added.txt"), 0)
+            .is_some());
+    }
+
     #[test]
     fn unstage_selected_file_restores_head_index_without_losing_worktree_edit() {
         let fixture = TempRepo::init();
