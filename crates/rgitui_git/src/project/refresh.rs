@@ -49,10 +49,6 @@ pub(super) struct WorktreeStatusCache {
 }
 
 impl WorktreeStatusCache {
-    pub(super) fn new() -> Self {
-        Self::default()
-    }
-
     fn generation(&self, path: &Path) -> u64 {
         self.generations.get(path).copied().unwrap_or(0)
     }
@@ -3309,6 +3305,43 @@ mod commit_log_reuse_tests {
         let next = gather(&repo, &caches, effective_limit);
         assert!(Arc::ptr_eq(&loaded, &next.recent_commits));
         assert_eq!(next.recent_commits.len(), 5);
+    }
+
+    #[test]
+    fn deferred_stats_update_only_their_matching_files() {
+        let mut status = WorkingTreeStatus {
+            staged: vec![
+                FileStatus {
+                    path: PathBuf::from("one.rs"),
+                    kind: FileChangeKind::Modified,
+                    old_path: None,
+                    additions: 0,
+                    deletions: 0,
+                },
+                FileStatus {
+                    path: PathBuf::from("two.rs"),
+                    kind: FileChangeKind::Modified,
+                    old_path: None,
+                    additions: 0,
+                    deletions: 0,
+                },
+            ],
+            unstaged: vec![],
+        };
+        let changed = merge_line_stats(
+            &mut status,
+            &HashMap::from([(PathBuf::from("one.rs"), (12, 3))]),
+            &HashMap::new(),
+        );
+        assert!(changed);
+        assert_eq!(status.staged[0].additions, 12);
+        assert_eq!(status.staged[0].deletions, 3);
+        assert_eq!(status.staged[1].additions, 0);
+        assert!(!merge_line_stats(
+            &mut status,
+            &HashMap::from([(PathBuf::from("one.rs"), (12, 3))]),
+            &HashMap::new(),
+        ));
     }
 
     #[test]
