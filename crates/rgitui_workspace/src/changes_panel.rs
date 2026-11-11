@@ -296,47 +296,47 @@ fn build_commit_selection(
     rows: &[ChangeRow],
     overrides: &HashMap<PathBuf, CheckState>,
 ) -> (Vec<CommitSelectedFile>, Vec<PathBuf>) {
-        let mut included = Vec::new();
-        let mut excluded = Vec::new();
-        let mut rename_sources = Vec::new();
-        for row in rows.iter().filter(|row| !row.has_conflict()) {
-            let state = visual_state(row, overrides);
-            let contents = match state {
-                CheckState::Checked => Some(CommitFileContents::WorkingTree),
-                CheckState::Indeterminate => Some(CommitFileContents::Staged),
-                CheckState::Unchecked => None,
-            };
-            if let Some(contents) = contents {
-                included.push(CommitSelectedFile {
-                    path: row.path.clone(),
-                    contents,
-                });
-                // A rename is a pair: the original path must be removed when
-                // the new one is selected, even if status only lists its new path.
-                for status in row.staged.iter().chain(row.unstaged.iter()) {
-                    if status.kind == FileChangeKind::Renamed {
-                        if let Some(old_path) = status.old_path.as_ref() {
-                            rename_sources.push(CommitSelectedFile {
-                                path: old_path.clone(),
-                                contents,
-                            });
-                        }
+    let mut included = Vec::new();
+    let mut excluded = Vec::new();
+    let mut rename_sources = Vec::new();
+    for row in rows.iter().filter(|row| !row.has_conflict()) {
+        let state = visual_state(row, overrides);
+        let contents = match state {
+            CheckState::Checked => Some(CommitFileContents::WorkingTree),
+            CheckState::Indeterminate => Some(CommitFileContents::Staged),
+            CheckState::Unchecked => None,
+        };
+        if let Some(contents) = contents {
+            included.push(CommitSelectedFile {
+                path: row.path.clone(),
+                contents,
+            });
+            // A rename is a pair: the original path must be removed when
+            // the new one is selected, even if status only lists its new path.
+            for status in row.staged.iter().chain(row.unstaged.iter()) {
+                if status.kind == FileChangeKind::Renamed {
+                    if let Some(old_path) = status.old_path.as_ref() {
+                        rename_sources.push(CommitSelectedFile {
+                            path: old_path.clone(),
+                            contents,
+                        });
                     }
                 }
-            } else {
-                excluded.push(row.path.clone());
             }
+        } else {
+            excluded.push(row.path.clone());
         }
+    }
 
-        for old in rename_sources {
-            if !included.iter().any(|file| file.path == old.path) {
-                included.push(old);
-            }
+    for old in rename_sources {
+        if !included.iter().any(|file| file.path == old.path) {
+            included.push(old);
         }
-        // Rename sources are included even if a stale separate status entry
-        // listed the old path as excluded.
-        excluded.retain(|path| !included.iter().any(|file| &file.path == path));
-        (included, excluded)
+    }
+    // Rename sources are included even if a stale separate status entry
+    // listed the old path as excluded.
+    excluded.retain(|path| !included.iter().any(|file| &file.path == path));
+    (included, excluded)
 }
 
 /// GitHub Desktop-style working-tree list. Row and header checkboxes are
@@ -570,8 +570,8 @@ impl ChangesPanel {
             .ok();
     }
 
-    /// Capture all visible virtual choices for a commit. Filtering does not
-    /// affect the commit selection, only what is displayed in the list.
+    /// Capture virtual choices for all changed paths. Filtering affects only
+    /// the visible list and never silently excludes hidden commit selections.
     pub fn commit_selection(&self) -> (Vec<CommitSelectedFile>, Vec<PathBuf>) {
         build_commit_selection(&self.rows, &self.overrides)
     }
@@ -708,8 +708,8 @@ impl ChangesPanel {
         cx.notify();
     }
 
-    /// Clicking a checkbox within a multi-selection applies one operation to
-    /// the group. Shift-clicking a checkbox also stages/unstages the range.
+    /// Clicking a checkbox within a multi-selection toggles its virtual choices.
+    /// Shift-clicking a checkbox applies the choice across the visible range.
     fn toggle_checkbox(
         &mut self,
         row_number: usize,
