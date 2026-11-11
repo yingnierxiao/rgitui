@@ -216,13 +216,12 @@ impl ChangeContextMenuActions {
     fn height(self) -> f32 {
         // Open (or conflict resolver), copy path, plus the conditional actions.
         let item_count = 2
-            + usize::from(self.staged_diff)
-            + usize::from(self.stage)
-            + usize::from(self.unstage)
-            + usize::from(self.discard);
+            + self.staged_diff as usize
+            + self.stage as usize
+            + self.unstage as usize
+            + self.discard as usize;
         // Copy-path separator, plus separators before Stage and Discard.
-        let separator_count =
-            1 + usize::from(self.stage) + usize::from(self.discard);
+        let separator_count = 1 + self.stage as usize + self.discard as usize;
         8.0 + item_count as f32 * 28.0 + separator_count as f32 * 9.0
     }
 }
@@ -1429,7 +1428,12 @@ impl Render for ChangesPanel {
                         ),
                     );
 
-                    if let Some(staged_event) = actions.staged_diff.then(|| row.staged_preview_event()).flatten() {
+                    let staged_event = if actions.staged_diff {
+                        row.staged_preview_event()
+                    } else {
+                        None
+                    };
+                    if let Some(staged_event) = staged_event {
                         let panel = weak_panel.clone();
                         let sidebar = weak_sidebar.clone();
                         menu = menu.item(
