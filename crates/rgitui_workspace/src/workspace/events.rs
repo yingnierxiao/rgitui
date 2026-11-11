@@ -2163,9 +2163,21 @@ pub(super) fn subscribe_graph(
                     );
                     if let Some(cached) = cached {
                         let dv = diff_viewer.clone();
-                        let dp = detail_panel_ref.clone();
                         let cached = cached.clone();
-                        let display_generation = if let Some(first_file) = cached.files.first() {
+
+                        // The cached CommitDiff already contains every changed
+                        // file. Populate the History file list *synchronously*
+                        // with the diff: waiting for metadata enrichment caused
+                        // it to show the previous commit's file list, or no
+                        // list at all, during fast commit navigation.
+                        if let Some(info) = commit_info.clone() {
+                            detail_panel_ref.update(cx, |dp, cx| {
+                                dp.set_commit_arc(info, cached.clone(), cx);
+                            });
+                        } else {
+                            detail_panel_ref.update(cx, |dp, cx| dp.clear(cx));
+                        }
+                        if let Some(first_file) = cached.files.first() {
                             let path = first_file.path.display().to_string();
                             let oid_str = commit_oid.to_string();
                             dv.update(cx, |dv, cx| {
@@ -2176,35 +2188,16 @@ pub(super) fn subscribe_graph(
                                     cx,
                                 )
                             });
-                            dv.read(cx).generation()
                         } else {
                             dv.update(cx, |dv, cx| dv.clear(cx));
-                            dv.read(cx).generation()
-                        };
-                        // Enrich commit info (is_signed, co_authors) in background
-                        if let Some(mut info) = commit_info.clone() {
-                            let enrich_path = repo_path.clone();
-                            cx.spawn(async move |_, cx: &mut gpui::AsyncApp| {
-                                let enriched = cx
-                                    .background_executor()
-                                    .spawn(async move {
-                                        rgitui_git::enrich_commit_info(&enrich_path, commit_oid)
-                                    })
-                                    .await;
-                                if let Ok((is_signed, co_authors)) = enriched {
-                                    info.is_signed = is_signed;
-                                    info.co_authors = co_authors;
-                                }
-                                cx.update(|cx| {
-                                    if dv.read(cx).generation() != display_generation {
-                                        return;
-                                    }
-                                    dp.update(cx, |dp, cx| dp.set_commit_arc(info, cached, cx));
-                                });
-                            })
-                            .detach();
                         }
+                        // The History panel shows only the changed-files list;
+                        // commit enrichment is not needed for this file-only UI.
                     } else {
+                        // Clear the previous commit's files before a background
+                        // cache miss. Otherwise the old file list is clickable
+                        // while a new commit diff is loading.
+                        detail_panel_ref.update(cx, |dp, cx| dp.clear(cx));
                         // Cache miss — submit selected commit first so it gets
                         // a thread pool slot before the prefetch tasks.
                         let dv = diff_viewer.clone();
