@@ -388,7 +388,7 @@ struct ChangesContextMenuState {
 }
 
 const CHANGE_CONTEXT_MENU_WIDTH: f32 = 220.0;
-const CHANGE_CONTEXT_MENU_HEIGHT: f32 = 196.0;
+const CHANGE_CONTEXT_MENU_HEIGHT: f32 = 210.0;
 
 pub struct ChangesPanel {
     sidebar: WeakEntity<Sidebar>,
@@ -996,6 +996,9 @@ impl Render for ChangesPanel {
                                     cx.stop_propagation();
                                     weak_panel_context
                                         .update(cx, |this, cx| {
+                                            if this.commit_in_progress {
+                                                return;
+                                            }
                                             this.select_visible_path(
                                                 &context_menu_path,
                                                 row_number,
@@ -1003,9 +1006,6 @@ impl Render for ChangesPanel {
                                                 false,
                                                 cx,
                                             );
-                                            if this.commit_in_progress {
-                                                return;
-                                            }
                                             this.context_menu = Some(ChangesContextMenuState {
                                                 path: context_menu_path.clone(),
                                                 position: event.position,
