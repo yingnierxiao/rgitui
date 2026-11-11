@@ -238,18 +238,20 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Hides or shows the commit graph, saving the choice with the rest of the
-    /// layout.
-    ///
-    /// Focus left on a graph being hidden is moved on by the next render (see
-    /// `Render for Workspace`): that is the one place every caller, the command
-    /// palette included, reaches with a `Window`.
+    /// Reveal History or Changes instead of splitting commit graph and diff
+    /// vertically. Preserve the old ToggleGraph command as a tab shortcut.
     pub(super) fn set_graph_hidden(&mut self, hidden: bool, cx: &mut Context<Self>) {
-        if self.layout.graph_hidden == hidden {
-            return;
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.right_panel_mode = if hidden {
+                RightPanelMode::Details
+            } else {
+                RightPanelMode::History
+            };
         }
-        self.layout.graph_hidden = hidden;
-        self.schedule_layout_save(cx);
+        if self.layout.graph_hidden != hidden {
+            self.layout.graph_hidden = hidden;
+            self.schedule_layout_save(cx);
+        }
         cx.notify();
     }
 
@@ -419,7 +421,13 @@ impl Workspace {
             CommandId::GrowDetailPanel => self.resize_detail_panel(DETAIL_PANEL_STEP, cx),
             CommandId::ShrinkDiffViewer => self.resize_diff_viewer(-DIFF_VIEWER_STEP, cx),
             CommandId::GrowDiffViewer => self.resize_diff_viewer(DIFF_VIEWER_STEP, cx),
-            CommandId::ToggleGraph => self.set_graph_hidden(!self.layout.graph_hidden, cx),
+            CommandId::ToggleGraph => {
+                let showing_history = self
+                    .tabs
+                    .get(self.active_tab)
+                    .is_some_and(|tab| tab.right_panel_mode == RightPanelMode::History);
+                self.set_graph_hidden(showing_history, cx);
+            },
             // Toggling the palette needs a `Window`, so it is handled in
             // `dispatch_command`. It is `[hidden]`, so the palette never
             // dispatches it to itself. The panel-focus commands likewise need a
