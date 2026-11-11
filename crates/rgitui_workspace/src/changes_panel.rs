@@ -9,7 +9,7 @@ use gpui::{
     KeyDownEvent, ListSizingBehavior, Render, ScrollStrategy, SharedString,
     UniformListScrollHandle, WeakEntity, Window,
 };
-use rgitui_git::{FileChangeKind, FileStatus};
+use rgitui_git::{CommitFileContents, CommitSelectedFile, FileChangeKind, FileStatus};
 use rgitui_i18n::{key, t, tp};
 use rgitui_settings::SettingsState;
 use rgitui_theme::{ActiveTheme, Color, StyledExt};
@@ -19,6 +19,15 @@ use rgitui_ui::{
 };
 
 use crate::{Sidebar, SidebarEvent};
+
+/// A virtual checkbox changed; Commit uses this count rather than Git index status.
+#[derive(Debug, Clone)]
+pub enum ChangesPanelEvent {
+    SelectionChanged(usize),
+}
+
+impl gpui::EventEmitter<ChangesPanelEvent> for ChangesPanel {}
+
 
 /// One row per path, even when both the index and working tree have changes.
 /// A partially staged file is represented by an indeterminate checkbox.
@@ -252,22 +261,14 @@ fn change_matches_filter(
             || row.path.to_string_lossy().to_lowercase().contains(needle))
 }
 
-/// The Git index remains authoritative; these are temporary visual states
-/// while an asynchronous stage/unstage request is in flight.
-fn visual_state(row: &ChangeRow, pending: &HashMap<PathBuf, CheckState>) -> CheckState {
-    pending.get(&row.path).copied().unwrap_or_else(|| row.state())
-}
-
-/// Clear optimistic states only after the refreshed index agrees with them.
-/// An earlier watcher snapshot must not undo a checkbox while Git is still working.
-fn reconcile_pending(rows: &[ChangeRow], pending: &mut HashMap<PathBuf, CheckState>) -> bool {
-    let previous_count = pending.len();
-    pending.retain(|path, desired| {
-        rows.binary_search_by(|row| row.path.cmp(path))
-            .ok()
-            .is_some_and(|index| rows[index].state() != *desired)
-    });
-    previous_count != pending.len()
+/// A checkbox is a virtual include-in-commit selection. It never writes the
+/// Git index. The initial display reflects existing staging, including partial
+/// staging, while subsequent choices are explicit in-memory overrides.
+fn visual_state(row: &ChangeRow, overrides: &HashMap<PathBuf, CheckState>) -> CheckState {
+    overrides
+        .get(&row.path)
+        .copied()
+        .unwrap_or_else(|| row.state())
 }
 
 fn visual_header_state(
@@ -339,46 +340,27 @@ fn selection_after_click(
     (selection, clicked_path)
 }
 
-/// Build one Git operation for the selected visible paths. Already staged,
-/// conflicted and in-flight paths are excluded to prevent redundant writes.
-fn selected_staging_action(
+/// Resolve only visible selected rows. No stage/unstage operation is sent.
+fn selected_virtual_paths(
     rows: &[ChangeRow],
     visible: &[usize],
     selected: &HashSet<PathBuf>,
-    pending: &HashMap<PathBuf, CheckState>,
-    target: CheckState,
-) -> Option<SidebarEvent> {
-    let paths: Vec<String> = visible
+) -> Vec<PathBuf> {
+    visible
         .iter()
         .filter_map(|index| rows.get(*index))
-        .filter(|row| {
-            selected.contains(&row.path)
-                && !row.has_conflict()
-                && !pending.contains_key(&row.path)
-                && match target {
-                    CheckState::Checked => row.unstaged.is_some(),
-                    CheckState::Unchecked => row.staged.is_some(),
-                    CheckState::Indeterminate => false,
-                }
-        })
-        .map(|row| row.path.to_string_lossy().into_owned())
-        .collect();
-    if paths.is_empty() {
-        None
-    } else if target == CheckState::Checked {
-        Some(SidebarEvent::StageFiles(paths))
-    } else {
-        Some(SidebarEvent::UnstageFiles(paths))
-    }
+        .filter(|row| selected.contains(&row.path) && !row.has_conflict())
+        .map(|row| row.path.clone())
+        .collect()
 }
 
-/// GitHub Desktop-style working-tree list. The repository navigation Sidebar
-/// retains sole ownership of Git actions; this panel forwards SidebarEvent
-/// instead of implementing a second set of Stage/Unstage handlers.
+/// GitHub Desktop-style working-tree list. Row and header checkboxes are
+/// virtual, so fast toggles never queue Git index operations or status scans.
+
 pub struct ChangesPanel {
     sidebar: WeakEntity<Sidebar>,
     rows: Arc<Vec<ChangeRow>>,
-    pending: Arc<HashMap<PathBuf, CheckState>>,
+    overrides: Arc<HashMap<PathBuf, CheckState>>,
     visible: Arc<Vec<usize>>,
     selected_paths: Arc<HashSet<PathBuf>>,
     selection_anchor: Option<PathBuf>,
@@ -420,7 +402,7 @@ impl ChangesPanel {
         Self {
             sidebar,
             rows: Arc::new(Vec::new()),
-            pending: Arc::new(HashMap::new()),
+            overrides: Arc::new(HashMap::new()),
             visible: Arc::new(Vec::new()),
             selected_paths: Arc::new(HashSet::new()),
             selection_anchor: None,
@@ -443,7 +425,7 @@ impl ChangesPanel {
     pub fn set_worktree(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if self.worktree_path.as_ref() != Some(&path) {
             self.worktree_path = Some(path);
-            self.pending = Arc::new(HashMap::new());
+            self.overrides = Arc::new(HashMap::new());
             self.selected_paths = Arc::new(HashSet::new());
             self.selection_anchor = None;
             self.selected_path = None;
@@ -460,8 +442,13 @@ impl ChangesPanel {
         cx: &mut Context<Self>,
     ) {
         let updated = combine_changes(staged, unstaged);
-        let pending_changed = reconcile_pending(&updated, Arc::make_mut(&mut self.pending));
-        if self.rows.as_ref() == &updated && !pending_changed {
+        // A watcher refresh must not undo the user's checkbox choices.
+        // Only remove overrides for paths that have genuinely disappeared.
+        let before = self.overrides.len();
+        Arc::make_mut(&mut self.overrides).retain(|path, _| {
+            updated.binary_search_by(|row| row.path.cmp(path)).is_ok()
+        });
+        if self.rows.as_ref() == &updated && before == self.overrides.len() {
             return;
         }
         if self
@@ -519,7 +506,7 @@ impl ChangesPanel {
     fn update_counts(&mut self, rows: &[ChangeRow]) {
         self.staged_count = rows
             .iter()
-            .filter(|row| visual_state(row, &self.pending) != CheckState::Unchecked)
+            .filter(|row| visual_state(row, &self.overrides) != CheckState::Unchecked)
             .count();
     }
 
@@ -540,7 +527,7 @@ impl ChangesPanel {
             .filter(|(_, row)| {
                 change_matches_filter(row, &needle, self.kind_filter, false)
                     && (!self.only_staged
-                        || visual_state(row, &self.pending) != CheckState::Unchecked)
+                        || visual_state(row, &self.overrides) != CheckState::Unchecked)
             })
             .map(|(index, _)| index)
             .collect();
@@ -555,12 +542,8 @@ impl ChangesPanel {
                     .then_with(|| left_row.path.cmp(&right_row.path))
             });
         }
-        let (state, action) = bulk_toggle_for_visible(&self.rows, &visible);
-        self.header_state = if self.pending.is_empty() {
-            state
-        } else {
-            visual_header_state(&self.rows, &visible, &self.pending)
-        };
+        let (_state, action) = bulk_toggle_for_visible(&self.rows, &visible);
+        self.header_state = visual_header_state(&self.rows, &visible, &self.overrides);
         self.header_action = action;
         if !self.selected_paths.is_empty() {
             let visible_paths: HashSet<&Path> = visible
@@ -587,77 +570,106 @@ impl ChangesPanel {
             .ok();
     }
 
-    /// Display the user's intent immediately without mutating the Git snapshot.
-    /// Rows with in-flight operations stay disabled until the index confirms
-    /// them (or an operation failure rolls the visual state back).
-    fn optimistic_stage_action(&mut self, event: &SidebarEvent, cx: &mut Context<Self>) {
-        let (desired, paths): (CheckState, Option<&[String]>) = match event {
-            SidebarEvent::StageFile(path) => {
-                (CheckState::Checked, Some(std::slice::from_ref(path)))
+    /// Capture all visible virtual choices for a commit. Filtering does not
+    /// affect the commit selection, only what is displayed in the list.
+    pub fn commit_selection(&self) -> (Vec<CommitSelectedFile>, Vec<PathBuf>) {
+        let mut included = Vec::new();
+        let mut excluded = Vec::new();
+        for row in self.rows.iter().filter(|row| !row.has_conflict()) {
+            match visual_state(row, &self.overrides) {
+                CheckState::Checked => included.push(CommitSelectedFile {
+                    path: row.path.clone(),
+                    contents: CommitFileContents::WorkingTree,
+                }),
+                CheckState::Indeterminate => included.push(CommitSelectedFile {
+                    path: row.path.clone(),
+                    contents: CommitFileContents::Staged,
+                }),
+                CheckState::Unchecked => excluded.push(row.path.clone()),
             }
-            SidebarEvent::UnstageFile(path) => {
-                (CheckState::Unchecked, Some(std::slice::from_ref(path)))
-            }
-            SidebarEvent::StageFiles(paths) => (CheckState::Checked, Some(paths)),
-            SidebarEvent::UnstageFiles(paths) => (CheckState::Unchecked, Some(paths)),
-            SidebarEvent::StageAll => (CheckState::Checked, None),
-            SidebarEvent::UnstageAll => (CheckState::Unchecked, None),
-            _ => return,
-        };
+        }
+        (included, excluded)
+    }
 
-        let pending = Arc::make_mut(&mut self.pending);
+    pub fn selected_commit_count(&self) -> usize {
+        self.staged_count
+    }
+
+    fn set_virtual_paths(
+        &mut self,
+        paths: &[PathBuf],
+        desired: CheckState,
+        cx: &mut Context<Self>,
+    ) {
         let mut changed = false;
-        for row in self.rows.iter() {
-            if row.has_conflict()
-                || pending.contains_key(&row.path)
-                || row.state() == desired
-            {
-                continue;
+        for path in paths {
+            if let Ok(index) = self.rows.binary_search_by(|row| row.path.cmp(path)) {
+                let row = &self.rows[index];
+                if row.has_conflict() {
+                    continue;
+                }
+                let previous = visual_state(row, &self.overrides);
+                if previous == desired {
+                    continue;
+                }
+                if previous != CheckState::Unchecked {
+                    self.staged_count = self.staged_count.saturating_sub(1);
+                }
+                if desired != CheckState::Unchecked {
+                    self.staged_count += 1;
+                }
+                Arc::make_mut(&mut self.overrides).insert(path.clone(), desired);
+                changed = true;
             }
-            if paths.is_some_and(|paths| {
-                !paths.iter().any(|path| row.path.as_path() == Path::new(path))
-            }) {
-                continue;
-            }
-            pending.insert(row.path.clone(), desired);
-            changed = true;
         }
         if changed {
-            self.staged_count = self
-                .rows
-                .iter()
-                .filter(|row| visual_state(row, &self.pending) != CheckState::Unchecked)
-                .count();
-            self.rebuild_filter();
+            // Filtering by included files needs a new visible list; other
+            // toggles only recompute the tiny header display.
+            if self.only_staged {
+                self.rebuild_filter();
+            } else {
+                self.header_state =
+                    visual_header_state(&self.rows, &self.visible, &self.overrides);
+            }
+            cx.emit(ChangesPanelEvent::SelectionChanged(self.staged_count));
             cx.notify();
         }
     }
 
-    fn dispatch_stage_action(&mut self, event: SidebarEvent, cx: &mut Context<Self>) {
-        self.optimistic_stage_action(&event, cx);
-        self.send(event, cx);
+    /// A commit consumes its selected paths; a failed commit keeps the user's
+    /// virtual choices so they can correct the error without selecting again.
+    pub fn commit_succeeded(
+        &mut self,
+        paths: &[PathBuf],
+        cx: &mut Context<Self>,
+    ) {
+        let overrides = Arc::make_mut(&mut self.overrides);
+        let mut changed = false;
+        for path in paths {
+            changed |= overrides.remove(path).is_some();
+        }
+        if changed {
+            let rows = self.rows.clone();
+            self.update_counts(&rows);
+            self.rebuild_filter();
+            cx.emit(ChangesPanelEvent::SelectionChanged(self.staged_count));
+            cx.notify();
+        }
     }
 
-    /// A failed Git operation must not leave a phantom checked/unchecked row.
-    /// The existing error toast remains responsible for reporting the failure.
-    pub fn rollback_pending(&mut self, stage: bool, cx: &mut Context<Self>) {
-        let desired = if stage {
-            CheckState::Checked
-        } else {
+    fn toggle_all_visible(&mut self, cx: &mut Context<Self>) {
+        let desired = if self.header_state == CheckState::Checked {
             CheckState::Unchecked
+        } else {
+            CheckState::Checked
         };
-        let pending = Arc::make_mut(&mut self.pending);
-        let before = pending.len();
-        pending.retain(|_, target| *target != desired);
-        if pending.len() != before {
-            self.staged_count = self
-                .rows
-                .iter()
-                .filter(|row| visual_state(row, &self.pending) != CheckState::Unchecked)
-                .count();
-            self.rebuild_filter();
-            cx.notify();
-        }
+        let paths = self.visible
+            .iter()
+            .filter_map(|index| self.rows.get(*index))
+            .filter(|row| !row.has_conflict())
+            .map(|row| row.path.clone())
+            .collect::<Vec<_>>();
+        self.set_virtual_paths(&paths, desired, cx);
     }
 
     /// Regular click selects one row, Ctrl/Cmd toggles individual rows and
@@ -708,30 +720,16 @@ impl ChangesPanel {
         let Some(row) = self.rows.get(index) else {
             return;
         };
-        if row.has_conflict() || self.pending.contains_key(&path) {
+        if row.has_conflict() {
             return;
         }
-        // Keep the existing single-file path and its precise Git status
-        // messages; only multi-selection needs a batch operation.
-        if self.selected_paths.len() == 1 {
-            let action = row.toggle_event();
-            self.dispatch_stage_action(action, cx);
-            return;
-        }
-        let target = if visual_state(row, &self.pending) == CheckState::Checked {
+        let target = if visual_state(row, &self.overrides) == CheckState::Checked {
             CheckState::Unchecked
         } else {
             CheckState::Checked
         };
-        if let Some(action) = selected_staging_action(
-            &self.rows,
-            &self.visible,
-            &self.selected_paths,
-            &self.pending,
-            target,
-        ) {
-            self.dispatch_stage_action(action, cx);
-        }
+        let paths = selected_virtual_paths(&self.rows, &self.visible, &self.selected_paths);
+        self.set_virtual_paths(&paths, target, cx);
     }
 
     fn select_all_visible(&mut self, cx: &mut Context<Self>) {
@@ -789,7 +787,7 @@ impl Render for ChangesPanel {
         let colors = cx.colors().clone();
         let row_colors = colors.clone();
         let rows = self.rows.clone();
-        let pending = self.pending.clone();
+        let overrides = self.overrides.clone();
         let visible = self.visible.clone();
         let selected_paths = self.selected_paths.clone();
         let sidebar = self.sidebar.clone();
@@ -797,9 +795,8 @@ impl Render for ChangesPanel {
         let show_line_stats = cx.global::<SettingsState>().settings().show_change_line_stats;
         let staged_count = self.staged_count;
         let header_state = self.header_state;
-        let header_action = self.header_action.clone();
+        let has_selectable_rows = self.header_action.is_some();
         let panel_header = panel.clone();
-        let has_pending = !self.pending.is_empty();
         let file_count = rows.len();
         let kind_filter_button = panel.clone();
         let staged_filter_button = panel.clone();
@@ -842,8 +839,8 @@ impl Render for ChangesPanel {
                             .into();
                         let kind = row.kind();
                         let is_selected = selected_paths.contains(&row.path);
-                        let check_state = visual_state(row, &pending);
-                        let disabled = row.has_conflict() || pending.contains_key(&row.path);
+                        let check_state = visual_state(row, &overrides);
+                        let disabled = row.has_conflict();
                         let select_action = row.selected_event();
                         let staged_preview = row.staged_preview_event();
                         let stats = row.display_status().cloned();
@@ -1017,16 +1014,12 @@ impl Render for ChangesPanel {
                     .border_color(colors.border_variant)
                     .child(
                         Checkbox::new("changes-check-all", header_state)
-                            .disabled(header_action.is_none() || has_pending)
+                            .disabled(!has_selectable_rows)
                             .on_click(move |_, _, cx| {
                                 cx.stop_propagation();
-                                if let Some(ref action) = header_action {
-                                    panel_header
-                                        .update(cx, |this, cx| {
-                                            this.dispatch_stage_action(action.clone(), cx);
-                                        })
-                                        .ok();
-                                }
+                                panel_header
+                                    .update(cx, |this, cx| this.toggle_all_visible(cx))
+                                    .ok();
                             }),
                     )
                     .child(
@@ -1289,9 +1282,9 @@ mod tests {
     fn optimistic_states_reconcile_only_after_index_confirms_them() {
         let rows = combine_changes(vec![], vec![file("a.rs", FileChangeKind::Modified)]);
         let mut pending = HashMap::from([(PathBuf::from("a.rs"), CheckState::Checked)]);
-        assert_eq!(visual_state(&rows[0], &pending), CheckState::Checked);
+        assert_eq!(visual_state(&rows[0], &overrides), CheckState::Checked);
         assert!(!reconcile_pending(&rows, &mut pending));
-        assert_eq!(visual_header_state(&rows, &[0], &pending), CheckState::Checked);
+        assert_eq!(visual_header_state(&rows, &[0], &overrides), CheckState::Checked);
         let confirmed = combine_changes(vec![file("a.rs", FileChangeKind::Modified)], vec![]);
         assert!(reconcile_pending(&confirmed, &mut pending));
         assert!(pending.is_empty());
@@ -1302,7 +1295,7 @@ mod tests {
         let staged = combine_changes(vec![file("a.rs", FileChangeKind::Modified)], vec![]);
         let mut pending = HashMap::from([(PathBuf::from("a.rs"), CheckState::Unchecked)]);
         assert!(!reconcile_pending(&staged, &mut pending));
-        assert_eq!(visual_state(&staged[0], &pending), CheckState::Unchecked);
+        assert_eq!(visual_state(&staged[0], &overrides), CheckState::Unchecked);
         let unstaged = combine_changes(vec![], vec![file("a.rs", FileChangeKind::Modified)]);
         assert!(reconcile_pending(&unstaged, &mut pending));
         assert!(pending.is_empty());
