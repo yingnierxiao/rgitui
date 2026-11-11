@@ -1430,6 +1430,14 @@ pub(super) fn subscribe_project(cx: &mut Context<Workspace>, subs: ProjectSubscr
                     }
                 }
 
+                if update.kind == GitOperationKind::Commit {
+                    if let Some(tab) = this.tabs.iter().find(|tab| tab.project == project) {
+                        tab.changes_panel.update(cx, |panel, cx| {
+                            panel.set_commit_in_progress(is_running, cx);
+                        });
+                    }
+                }
+
                 toolbar.update(cx, |tb, cx| {
                     tb.set_fetching(is_running && update.kind == GitOperationKind::Fetch, cx);
                     tb.set_pulling(is_running && update.kind == GitOperationKind::Pull, cx);
