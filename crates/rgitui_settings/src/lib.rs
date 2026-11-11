@@ -393,13 +393,17 @@ fn default_sidebar_width() -> f32 {
     276.0
 }
 fn default_detail_panel_width() -> f32 {
-    352.0
+    // Right panel now contains the staging list and commit form; give file
+    // names and parent paths more space by default on fresh installations.
+    420.0
 }
 fn default_diff_viewer_height() -> f32 {
     345.0
 }
 fn default_commit_input_height() -> f32 {
-    385.0
+    // Reserve more vertical room for changed files, matching the new layout.
+    // Existing saved panel heights remain user-controlled and unchanged.
+    300.0
 }
 
 impl Default for LayoutSettings {

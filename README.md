@@ -63,7 +63,8 @@
 - **File history** — commit history filtered to a single file
 - **Reflog** — reference log browser
 - **Global search** — full-repo search via `git grep`
-- **Detail panel** — commit metadata, file list with diff stats, cherry-pick controls
+- **Detail panel** — commit metadata and actions beneath repository navigation on the left
+- **Changes panel** — virtualized, flat file list on the right with GitHub Desktop-style staging checkboxes, file filters, and a commit form below it
 
 ### GitHub integration
 
@@ -73,6 +74,9 @@
 
 ### UI
 
+- The left sidebar contains branches, remotes, tags, stashes and worktrees; the commit detail view sits below it
+- The right changes panel shows a flat list (no directory tree). Click a row to preview its diff; click its checkbox to stage/unstage without changing the preview
+- Partially staged files show an indeterminate checkbox and a separate **Staged diff** preview. The header checkbox acts on visible files when filtered and does not toggle conflicts
 - Drag-resizable sidebar, detail panel, diff viewer, and commit panel
 - Command palette (`Ctrl+P`) with context-aware commands
 - Toolbar with one-click fetch, pull, push, branch, stash, create PR, and more
@@ -196,6 +200,14 @@ rgitui /path/to/repo
 | `u` | Unstage selected hunks/lines |
 | `Ctrl+C` | Copy selected lines |
 | `Ctrl+A` | Select all |
+
+### Changes panel
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` or `j` / `k` | Select previous / next changed file |
+| `Enter` | Preview selected file's diff |
+| `Space` / `s` | Stage / unstage selected file |
 
 ### Sidebar
 

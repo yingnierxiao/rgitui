@@ -70,7 +70,7 @@ english_messages! {
     "changes.kind.other" => "Other",
     "changes.no_matches" => "No matching files",
     "changes.only_staged" => "Staged",
-    "changes.preview_staged" => "Index",
+    "changes.preview_staged" => "Staged diff",
     "changes.sort.path" => "By path",
     "changes.sort.status" => "By status",
     "changes.tab" => "Changes",
