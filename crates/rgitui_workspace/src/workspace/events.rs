@@ -3032,15 +3032,13 @@ pub(super) fn subscribe_commit_panel(
     cx.subscribe(commit_panel, {
         move |this, _cp, event: &CommitPanelEvent, cx| match event {
             CommitPanelEvent::CommitRequested { message, amend } => {
-                let worktree_path = this.effective_worktree_path(cx);
-                let changes_panel = this
-                    .tabs
-                    .iter()
-                    .find(|tab| tab.project == project)
-                    .map(|tab| tab.changes_panel.clone());
-                let Some(changes_panel) = changes_panel else {
+                // Resolve the checkout from the panel's owning tab, not the
+                // active tab (a background tab may finish an operation later).
+                let Some(tab) = this.tabs.iter().find(|tab| tab.project == project) else {
                     return;
                 };
+                let worktree_path = tab.effective_repo_path(cx);
+                let changes_panel = tab.changes_panel.clone();
                 // Freeze the selection for this exact worktree at click time.
                 // Neither checking files nor gathering the list touches Git.
                 let selection = changes_panel.read(cx).commit_selection();
