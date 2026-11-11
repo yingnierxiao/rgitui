@@ -39,7 +39,17 @@ fn push_with_auto_pull(
     force: bool,
     pulled: &mut bool,
 ) -> Result<Option<String>> {
-    match run_git_network_command(worktree, args) {
+    let operation_started = std::time::Instant::now();
+    let first_started = std::time::Instant::now();
+    let initial_push = run_git_network_command(worktree, args);
+    log::info!(
+        "push timing: initial push completed in {:?} result={} remote={} branch={}",
+        first_started.elapsed(),
+        if initial_push.is_ok() { "success" } else { "failed" },
+        remote,
+        remote_branch,
+    );
+    match initial_push {
         Ok(details) => Ok(details),
         Err(push_error) if !force && is_remote_ahead_rejection(&push_error.to_string()) => {
             log::info!(
@@ -47,6 +57,7 @@ fn push_with_auto_pull(
                 remote,
                 remote_branch
             );
+            let check_started = std::time::Instant::now();
             let repo = open_worktree_repo(worktree)?;
             // A remote may use a different push URL from its fetch URL.
             // Pulling from that other repository would merge the wrong history.
@@ -79,15 +90,28 @@ fn push_with_auto_pull(
                      uncommitted changes. Commit or stash them before retrying Push."
                 );
             }
+            log::info!(
+                "push timing: automatic pull preflight completed in {:?} worktree={}",
+                check_started.elapsed(),
+                worktree.display()
+            );
             drop(repo);
             // Set before pulling: a merge conflict may modify HEAD, the index
             // or the worktree even when the Git command returns an error.
             *pulled = true;
-            run_git_network_command(
+            let pull_started = std::time::Instant::now();
+            let pull_result = run_git_network_command(
                 worktree,
                 &["pull", "--no-rebase", "--no-edit", remote, remote_branch],
-            )
-            .map_err(|error| {
+            );
+            log::info!(
+                "push timing: automatic pull completed in {:?} result={} remote={} branch={}",
+                pull_started.elapsed(),
+                if pull_result.is_ok() { "success" } else { "failed" },
+                remote,
+                remote_branch,
+            );
+            pull_result.map_err(|error| {
                 anyhow::anyhow!(
                     "Automatic pull of {remote}/{remote_branch} failed: {error}. \
                      Resolve any conflicts or other pull errors, then push again."
@@ -96,12 +120,43 @@ fn push_with_auto_pull(
 
             // Retry exactly once. A second rejection may mean a concurrent
             // remote update; never loop indefinitely or silently force.
-            let details = run_git_network_command(worktree, args).map_err(|error| {
-                anyhow::anyhow!(
-                    "Push retry after automatic pull failed: {error}. \
-                     The remote may have changed again; fetch and review it before retrying."
-                )
+            let retry_started = std::time::Instant::now();
+            let retry_result = run_git_network_command(worktree, args);
+            log::info!(
+                "push timing: retry push completed in {:?} result={} remote={} branch={}",
+                retry_started.elapsed(),
+                if retry_result.is_ok() { "success" } else { "failed" },
+                remote,
+                remote_branch
+            );
+            let details = retry_result.map_err(|error| {
+                let remote_advanced = is_remote_ahead_rejection(&error.to_string());
+                log::warn!(
+                    "push retry failed after successful automatic pull: remote_ahead={} total_elapsed={:?} worktree={}",
+                    remote_advanced,
+                    operation_started.elapsed(),
+                    worktree.display()
+                );
+                if remote_advanced {
+                    anyhow::anyhow!(
+                        "Automatic pull of {remote}/{remote_branch} succeeded, but the retry push \
+                         was rejected as non-fast-forward. The remote may have advanced again \
+                         or the pulled branch differs from the push destination. \
+                         Inspect the branch history before retrying: {error}"
+                    )
+                } else {
+                    anyhow::anyhow!(
+                        "Automatic pull of {remote}/{remote_branch} succeeded, but the retry push \
+                         failed: {error}. Inspect the remote error and retry."
+                    )
+                }
             })?;
+            log::info!(
+                "push timing: auto-pull/retry operation completed in {:?} remote={} branch={}",
+                operation_started.elapsed(),
+                remote,
+                remote_branch
+            );
             let auto_pull_detail =
                 format!("Automatically pulled {remote}/{remote_branch} before pushing.");
             Ok(Some(match details {
