@@ -57,6 +57,12 @@ pub enum SidebarEvent {
         path: String,
         staged: bool,
     },
+    /// Open the selected file and then show a lazily loaded inspection tab.
+    FileInspectionRequested {
+        path: String,
+        staged: bool,
+        blame: bool,
+    },
     /// Expand an untracked-directory placeholder into its file entries.
     ExpandUntrackedDirectory(String),
     StageFile(String),
