@@ -30,7 +30,7 @@ use crate::{
 
 use super::{
     ActiveOperation, AiGenerationTarget, BottomPanelMode, OperationOutput, UndoAction,
-    ViewCacheKey, ViewCaches, Workspace,
+    ViewCaches, Workspace,
 };
 
 pub(super) fn build_worktree_graph_infos(
