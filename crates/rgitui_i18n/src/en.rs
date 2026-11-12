@@ -152,7 +152,7 @@ english_messages! {
     "confirm.body.delete_tag" => "Are you sure you want to delete tag '{tag}'? This cannot be undone.",
     "confirm.body.discard_all" => "This will permanently discard all uncommitted changes.",
     "confirm.body.discard_file" => "Are you sure you want to discard changes to {path}?",
-    "confirm.body.discard_selected" => "Discard changes in {count} highlighted files?\\n\\n{paths}",
+    "confirm.body.discard_selected" => "Discard changes in {count} highlighted files?\n\n{paths}",
     "confirm.body.drop_stash" => "Are you sure you want to drop {stash}? This cannot be undone.",
     "confirm.body.force_push" => "This will overwrite the remote branch. Are you sure?",
     "confirm.body.remove_remote" => "Remove remote '{remote}' and its configured URLs from this repository?",
