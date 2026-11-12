@@ -1497,6 +1497,38 @@ pub(super) fn subscribe_sidebar(
 
     cx.subscribe(&sidebar, {
         move |this, _sidebar, event: &SidebarEvent, cx| match event {
+            SidebarEvent::FileInspectionRequested { path, staged, blame } => {
+                let mode = if *blame {
+                    BottomPanelMode::Blame
+                } else {
+                    BottomPanelMode::FileHistory
+                };
+                let owning_index = this.tabs.iter().position(|tab| tab.sidebar == sidebar_ref);
+                if let Some(index) = owning_index {
+                    if let Some(tab) = this.tabs.get(index) {
+                        let viewer = tab.diff_viewer.read(cx);
+                        if viewer.file_path() == Some(path.as_str()) && viewer.diff().is_some() {
+                            if index == this.active_tab {
+                                this.execute_command(
+                                    if *blame { crate::CommandId::Blame }
+                                    else { crate::CommandId::FileHistory },
+                                    cx,
+                                );
+                            }
+                            return;
+                        }
+                    }
+                    this.tabs[index].pending_file_inspection = Some((path.clone(), mode));
+                    // Reuse the existing file diff selection, including the
+                    // staged/unstaged source and generation checks.
+                    sidebar_ref.update(cx, |_, cx| {
+                        cx.emit(SidebarEvent::FileSelected {
+                            path: path.clone(),
+                            staged: *staged,
+                        });
+                    });
+                }
+            }
             SidebarEvent::FileSelected { path, staged } => {
                 log::info!("FileSelected: path={} staged={}", path, staged);
                 let path_buf = std::path::PathBuf::from(path);
@@ -1504,7 +1536,13 @@ pub(super) fn subscribe_sidebar(
                 let is_staged = *staged;
                 let repo_path = this.effective_worktree_path(cx);
                 if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.sidebar == sidebar_ref) {
-                    // Working tree and conflict files return to Changes.
+                    // Ordinary file selection cancels any pending right-click
+                    // navigation to a different path.
+                    if tab.pending_file_inspection.as_ref()
+                        .is_some_and(|(target, _)| target != path)
+                    {
+                        tab.pending_file_inspection = None;
+                    }
                     tab.right_panel_mode = super::RightPanelMode::Details;
                     tab.bottom_panel_mode = BottomPanelMode::Diff;
                     cx.notify();
@@ -2787,8 +2825,35 @@ pub(super) fn subscribe_diff_viewer(
                     project.read(cx).repo_path().to_path_buf()
                 };
 
-                // A diff change no longer starts git blame or file-history.
-                // These queries are expensive and are requested by their tabs.
+                // A context-menu request may be waiting for this file's
+                // ordinary diff. Ignore the loading notification; only the
+                // completed diff should activate the requested inspection.
+                let completed = diff_viewer_ref.read(cx).diff().is_some();
+                if completed {
+                    let requested = this.tabs.iter_mut()
+                        .enumerate()
+                        .find(|(_, tab)| tab.diff_viewer == diff_viewer_ref)
+                        .and_then(|(index, tab)| {
+                            let mode = tab.pending_file_inspection
+                                .as_ref()
+                                .filter(|(target, _)| target == path)
+                                .map(|(_, mode)| *mode)?;
+                            tab.pending_file_inspection = None;
+                            Some((index, mode))
+                        });
+                    if let Some((index, mode)) = requested {
+                        if index == this.active_tab {
+                            this.execute_command(
+                                if mode == BottomPanelMode::Blame {
+                                    crate::CommandId::Blame
+                                } else {
+                                    crate::CommandId::FileHistory
+                                },
+                                cx,
+                            );
+                        }
+                    }
+                }
                 cx.notify();
                 return;
             }
