@@ -668,6 +668,15 @@ pub(super) fn subscribe_confirm_dialog(
                                     .detach();
                             });
                         }
+                        ConfirmAction::DiscardFiles(paths) => {
+                            if !paths.is_empty() {
+                                let paths = paths.iter().map(std::path::PathBuf::from).collect::<Vec<_>>();
+                                let worktree_path = this.effective_worktree_path(cx);
+                                project.update(cx, |proj, cx| {
+                                    proj.discard_changes_at(&paths, &worktree_path, cx).detach();
+                                });
+                            }
+                        }
                         ConfirmAction::ForcePush => {
                             let worktree_path = this.effective_worktree_path(cx);
                             project.update(cx, |proj, cx| {
@@ -1764,6 +1773,14 @@ pub(super) fn subscribe_sidebar(
                 this.dialogs.confirm_dialog.update(cx, |cd, cx| {
                     cd.show_visible(ConfirmAction::DiscardFile(path), cx);
                 });
+            }
+            SidebarEvent::DiscardFiles(paths) => {
+                if !paths.is_empty() {
+                    let paths = paths.clone();
+                    this.dialogs.confirm_dialog.update(cx, |cd, cx| {
+                        cd.show_visible(ConfirmAction::DiscardFiles(paths), cx);
+                    });
+                }
             }
             SidebarEvent::StashSelected(index) => {
                 let idx = *index;
