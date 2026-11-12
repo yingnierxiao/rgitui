@@ -255,6 +255,7 @@ impl Workspace {
             global_search_view,
             right_panel_mode: RightPanelMode::Details,
             bottom_panel_mode: BottomPanelMode::Diff,
+            pending_file_inspection: None,
             caches,
             inspecting_worktree: None,
         });
