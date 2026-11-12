@@ -163,7 +163,15 @@ impl RefreshCaches {
         }
     }
 
+    #[track_caller]
     pub(super) fn mark_worktree_status_dirty(&self, path: &Path) {
+        let caller = std::panic::Location::caller();
+        log::debug!(
+            "status cache invalidated: path={} source={}:{}",
+            path.display(),
+            caller.file(),
+            caller.line(),
+        );
         self.worktree_status
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -171,7 +179,14 @@ impl RefreshCaches {
         self.status_refresh_epoch.fetch_add(1, Ordering::AcqRel);
     }
 
+    #[track_caller]
     pub(super) fn invalidate_all_status_cache(&self) {
+        let caller = std::panic::Location::caller();
+        log::debug!(
+            "all status caches invalidated: source={}:{}",
+            caller.file(),
+            caller.line(),
+        );
         self.worktree_status
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -788,6 +803,18 @@ fn compute_working_tree_status(
             );
             return Ok(status);
         }
+        // This log is emitted only when a costly status pass is about to
+        // happen. It separates cache misses from stale generations and
+        // line-stat mode changes without changing the cache policy.
+        let previous = guard.entries.get(repo_path);
+        log::info!(
+            "status scan required: path={} generation={} cached_generation={:?} requested_line_stats={} cached_line_stats={:?}",
+            repo_path.display(),
+            generation,
+            previous.map(|entry| entry.generation),
+            line_stats,
+            previous.map(|entry| entry.line_stats),
+        );
         Some(generation)
     } else {
         None
@@ -1848,7 +1875,15 @@ impl GitProject {
     /// Uses two-phase loading: the first batch of commits loads quickly so the
     /// UI appears populated during the splash animation, then the remainder
     /// loads in the background.
+    #[track_caller]
     pub fn refresh(&mut self, cx: &mut Context<Self>) -> Task<Result<()>> {
+        let caller = std::panic::Location::caller();
+        log::info!(
+            "full refresh requested: path={} caller={}:{}",
+            self.repo_path.display(),
+            caller.file(),
+            caller.line(),
+        );
         self.commit_query_generation = self.commit_query_generation.wrapping_add(1);
         self.load_more_in_flight = false;
         let query_generation = self.commit_query_generation;
