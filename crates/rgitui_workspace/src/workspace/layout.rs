@@ -1045,7 +1045,8 @@ impl Render for Workspace {
                                     };
 
                                 let history_enabled =
-                                    history_availability == ViewAvailability::Available;
+                                    current_view_key.is_some()
+                                        && history_availability != ViewAvailability::Unavailable;
                                 let history_tooltip = match history_availability {
                                     ViewAvailability::Loading => {
                                         t!("workspace.bottom.history_loading")
@@ -1058,7 +1059,8 @@ impl Render for Workspace {
                                     }
                                 };
                                 let blame_enabled =
-                                    blame_availability == ViewAvailability::Available;
+                                    current_view_key.is_some()
+                                        && blame_availability != ViewAvailability::Unavailable;
                                 let blame_tooltip = match blame_availability {
                                     ViewAvailability::Loading => {
                                         t!("workspace.bottom.blame_loading")
