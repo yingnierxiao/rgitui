@@ -1505,20 +1505,21 @@ pub(super) fn subscribe_sidebar(
                 };
                 let owning_index = this.tabs.iter().position(|tab| tab.sidebar == sidebar_ref);
                 if let Some(index) = owning_index {
-                    if let Some(tab) = this.tabs.get(index) {
+                    let already_displayed = this.tabs.get(index).is_some_and(|tab| {
                         let viewer = tab.diff_viewer.read(cx);
-                        if viewer.file_path() == Some(path.as_str()) && viewer.diff().is_some() {
-                            if index == this.active_tab {
-                                // The right-click action is "open", not a toggle.
-                                this.tabs[index].bottom_panel_mode = BottomPanelMode::Diff;
-                                this.execute_command(
-                                    if *blame { crate::CommandId::Blame }
-                                    else { crate::CommandId::FileHistory },
-                                    cx,
-                                );
-                            }
-                            return;
+                        viewer.file_path() == Some(path.as_str()) && viewer.diff().is_some()
+                    });
+                    if already_displayed {
+                        if index == this.active_tab {
+                            // The right-click action is "open", not a toggle.
+                            this.tabs[index].bottom_panel_mode = BottomPanelMode::Diff;
+                            this.execute_command(
+                                if *blame { crate::CommandId::Blame }
+                                else { crate::CommandId::FileHistory },
+                                cx,
+                            );
                         }
+                        return;
                     }
                     this.tabs[index].pending_file_inspection = Some((path.clone(), mode));
                     // Reuse the existing file diff selection, including the
