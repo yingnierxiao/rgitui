@@ -107,6 +107,7 @@ pub(super) enum ViewCacheEntry<T> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ViewAvailability {
+    NotRequested,
     Loading,
     Available,
     Unavailable,
@@ -157,7 +158,7 @@ impl ViewCaches {
             .lock()
             .ok()
             .and_then(|cache| cache.peek(key).map(ViewCacheEntry::availability))
-            .unwrap_or(ViewAvailability::Loading)
+            .unwrap_or(ViewAvailability::NotRequested)
     }
 
     fn history_availability(&self, key: &ViewCacheKey) -> ViewAvailability {
@@ -165,7 +166,7 @@ impl ViewCaches {
             .lock()
             .ok()
             .and_then(|cache| cache.peek(key).map(ViewCacheEntry::availability))
-            .unwrap_or(ViewAvailability::Loading)
+            .unwrap_or(ViewAvailability::NotRequested)
     }
 }
 
