@@ -532,12 +532,10 @@ impl Render for Workspace {
                 let retry = failed.clone();
                 let workspace = cx.entity();
                 status_bar = status_bar.on_retry(move |_, _, cx| {
-                    workspace
-                        .update(cx, |this, cx| {
-                            this.retry_git_operation(&retry, cx);
-                            cx.notify();
-                        })
-                        .ok();
+                    workspace.update(cx, |this, cx| {
+                        this.retry_git_operation(&retry, cx);
+                        cx.notify();
+                    });
                 });
             }
         } else if let Some(msg) = &self.status_message {
