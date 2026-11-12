@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 use gpui::prelude::*;
 use gpui::{
     div, img, px, uniform_list, App, ClickEvent, ClipboardItem, Context, ElementId, Entity,
-    EventEmitter, FocusHandle, ListSizingBehavior, ObjectFit, Render, ScrollStrategy, SharedString,
+    EventEmitter, FocusHandle, ListSizingBehavior, MouseButton, MouseDownEvent, ObjectFit, Render,
+    ScrollStrategy, SharedString,
     UniformListScrollHandle, WeakEntity, Window,
 };
 use rgitui_diff::DiffSource;
@@ -677,9 +678,22 @@ impl DetailPanel {
             )
         });
         if let Some(actual_index) = actual_index {
+            log::debug!(
+                "history file press: path={} old_index={} resolved_index={}",
+                path.display(),
+                index,
+                actual_index
+            );
             self.selected_file_index = Some(actual_index);
             self.emit_file_selected(cx);
             cx.notify();
+        } else {
+            log::warn!(
+                "history file press ignored: stale path={} index={} commit_changed={}",
+                path.display(),
+                index,
+                self.commit.as_ref().map(|commit| commit.oid) != expected_commit
+            );
         }
     }
 
@@ -1074,19 +1088,25 @@ impl DetailPanel {
                             .when(!selected, |el| el.border_color(border_transparent))
                             .hover(move |s| s.bg(ghost_element_hover))
                             .cursor_pointer()
-                            .on_click(move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                                weak.update(cx, |this, cx| {
-                                    if let Some(path) = row_path.as_ref() {
-                                        this.open_file_from_row(
-                                            displayed_commit,
-                                            actual_file_index,
-                                            path,
-                                            cx,
-                                        );
-                                    }
-                                })
-                                .ok();
-                            })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                move |_: &MouseDownEvent, _: &mut Window, cx: &mut App| {
+                                    cx.stop_propagation();
+                                    weak.update(cx, |this, cx| {
+                                        if let Some(path) = row_path.as_ref() {
+                                            this.open_file_from_row(
+                                                displayed_commit,
+                                                actual_file_index,
+                                                path,
+                                                cx,
+                                            );
+                                        } else {
+                                            log::warn!("history file press ignored: no row path at index {}", actual_file_index);
+                                        }
+                                    })
+                                    .ok();
+                                },
+                            )
                             .child(
                                 Icon::new(row.icon_name)
                                     .size(IconSize::XSmall)
@@ -1277,8 +1297,10 @@ impl DetailPanel {
                                     .when(!selected, |el| el.border_color(border_transparent))
                                     .hover(move |s| s.bg(ghost_element_hover))
                                     .cursor_pointer()
-                                    .on_click(
-                                        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        move |_: &MouseDownEvent, _: &mut Window, cx: &mut App| {
+                                            cx.stop_propagation();
                                             weak.update(cx, |this, cx| {
                                                 if let Some(path) = row_path.as_ref() {
                                                     this.open_file_from_row(
@@ -1287,6 +1309,8 @@ impl DetailPanel {
                                                         path,
                                                         cx,
                                                     );
+                                                } else {
+                                                    log::warn!("history tree file press ignored: no row path at index {}", actual_file_index);
                                                 }
                                             })
                                             .ok();
