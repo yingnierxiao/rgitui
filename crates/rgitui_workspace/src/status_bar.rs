@@ -230,7 +230,12 @@ impl StatusBar {
                 (Color::Muted, None)
             };
 
-            let mut msg_row = div().h_flex().gap(px(4.)).items_center();
+            // GPUI tooltips require a stateful element with an ID.
+            let mut msg_row = div()
+                .id("status-operation-message")
+                .h_flex()
+                .gap(px(4.))
+                .items_center();
 
             if let Some(icon) = msg_icon {
                 msg_row = msg_row.child(Icon::new(icon).size(IconSize::XSmall).color(msg_color));
