@@ -1394,7 +1394,6 @@ pub(super) fn subscribe_project(cx: &mut Context<Workspace>, subs: ProjectSubscr
                             label: update.summary.clone(),
                             started_at: Instant::now(),
                         });
-                        this.show_toast(update.summary.translated(), ToastKind::Info, cx);
                     }
                     GitOperationState::Succeeded => {
                         this.operations
@@ -1432,7 +1431,6 @@ pub(super) fn subscribe_project(cx: &mut Context<Workspace>, subs: ProjectSubscr
                             });
                             this.schedule_operation_output_auto_hide(now, cx);
                         }
-                        this.show_toast(update.summary.translated(), ToastKind::Success, cx);
                     }
                     GitOperationState::Failed => {
                         this.operations
@@ -1457,7 +1455,6 @@ pub(super) fn subscribe_project(cx: &mut Context<Workspace>, subs: ProjectSubscr
                             timestamp: Instant::now(),
                             expanded: true,
                         });
-                        this.show_toast(failure.translated(), ToastKind::Error, cx);
                     }
                 }
 
