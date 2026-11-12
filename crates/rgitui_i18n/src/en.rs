@@ -406,6 +406,7 @@ english_messages! {
     "git.pull.detail" => "Repository state refreshed after pull.",
     "git.pull.done" => "Pulled '{branch}' from '{remote}'",
     "git.pull.failed" => "Pull from '{remote}' failed",
+    "git.pull.local_changes_blocked" => "Pull blocked: local edits would be overwritten. Commit or stash them before retrying.",
     "git.pull.not_started" => "Pull could not start",
     "git.pull.running" => "Pulling '{branch}' from '{remote}'...",
     "git.pull.up_to_date" => "'{branch}' is already up to date with '{remote}'",
