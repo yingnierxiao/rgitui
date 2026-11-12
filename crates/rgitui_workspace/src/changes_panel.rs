@@ -1053,13 +1053,18 @@ impl Render for ChangesPanel {
                                             if this.commit_in_progress {
                                                 return;
                                             }
-                                            this.select_visible_path(
-                                                &context_menu_path,
-                                                row_number,
-                                                false,
-                                                false,
-                                                cx,
-                                            );
+                                            // Right-clicking within an existing multi-selection
+                                            // preserves it, as in GitHub Desktop. Right-clicking
+                                            // elsewhere selects only the clicked row.
+                                            if !this.selected_paths.contains(&context_menu_path) {
+                                                this.select_visible_path(
+                                                    &context_menu_path,
+                                                    row_number,
+                                                    false,
+                                                    false,
+                                                    cx,
+                                                );
+                                            }
                                             this.focus_handle.focus(window, cx);
                                             this.context_menu = Some(ChangesContextMenuState {
                                                 path: context_menu_path.clone(),
@@ -1576,10 +1581,33 @@ impl Render for ChangesPanel {
                     if actions.discard {
                         let sidebar = weak_sidebar.clone();
                         let panel = weak_panel.clone();
-                        let path = row.path.to_string_lossy().to_string();
-                        menu = menu.separator().item(
-                            ContextMenuItem::new(t!("changes.menu.discard")).on_click(
-                                move |_, _, cx| {
+                        // Discard acts on highlighted list rows, NOT commit
+                        // inclusion checkboxes. Never silently discard a subset
+                        // if another selected row is staged or conflicted.
+                        let highlighted = if self.selected_paths.contains(&row.path) {
+                            self.visible
+                                .iter()
+                                .filter_map(|index| self.rows.get(*index))
+                                .filter(|candidate| self.selected_paths.contains(&candidate.path))
+                                .collect::<Vec<_>>()
+                        } else {
+                            vec![&row]
+                        };
+                        if highlighted.iter().all(|candidate| {
+                            !candidate.has_conflict() && can_discard_to_head(candidate)
+                        }) {
+                            let paths = highlighted
+                                .iter()
+                                .map(|candidate| candidate.path.to_string_lossy().to_string())
+                                .collect::<Vec<_>>();
+                            let label = if paths.len() > 1 {
+                                format!("{} ({} files)", t!("changes.menu.discard"), paths.len())
+                                    .into()
+                            } else {
+                                t!("changes.menu.discard")
+                            };
+                            menu = menu.separator().item(
+                                ContextMenuItem::new(label).on_click(move |_, _, cx| {
                                     panel
                                         .update(cx, |this, cx| {
                                             this.context_menu = None;
@@ -1588,12 +1616,12 @@ impl Render for ChangesPanel {
                                         .ok();
                                     sidebar
                                         .update(cx, |_, cx| {
-                                            cx.emit(SidebarEvent::DiscardFile(path.clone()));
+                                            cx.emit(SidebarEvent::DiscardFiles(paths.clone()));
                                         })
                                         .ok();
-                                },
-                            ),
-                        );
+                                }),
+                            );
+                        }
                     }
                 }
 
