@@ -1,10 +1,7 @@
 use std::time::Instant;
 
-use gpui::prelude::*;
-use gpui::{div, px, ClickEvent, Context, SharedString};
+use gpui::Context;
 use rgitui_git::{GitOperationKind, GitOperationUpdate};
-use rgitui_theme::{ActiveTheme, Color, StyledExt};
-use rgitui_ui::{ButtonSize, ButtonStyle, Icon, IconButton, IconName, IconSize, Label, LabelSize};
 
 use crate::ToastKind;
 
@@ -35,129 +32,6 @@ impl Workspace {
             })
         })
         .detach();
-    }
-
-    pub(super) fn render_operation_output_bar(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
-        let output = self.operations.last_operation_output.as_ref()?;
-        let colors = cx.colors().clone();
-
-        let accent = if output.is_error {
-            cx.status().error
-        } else {
-            cx.status().success
-        };
-        let bg = if output.is_error {
-            cx.status().error_background
-        } else {
-            cx.status().success_background
-        };
-        let icon = if output.is_error {
-            IconName::FileConflict
-        } else {
-            IconName::Check
-        };
-        let icon_color = if output.is_error {
-            Color::Error
-        } else {
-            Color::Success
-        };
-
-        let operation_label = output.operation.translated();
-        let full_output = output.output.translated();
-        let first_line: SharedString = full_output.lines().next().unwrap_or("").to_string().into();
-        let expanded = output.expanded;
-        let has_multiple_lines = full_output.lines().count() > 1;
-
-        let mut bar = div()
-            .id("operation-output-bar")
-            .v_flex()
-            .w_full()
-            .bg(bg)
-            .border_b_1()
-            .border_color(accent);
-
-        let mut header = div()
-            .h_flex()
-            .w_full()
-            .min_h(px(28.))
-            .px(px(10.))
-            .py(px(2.))
-            .gap(px(6.))
-            .items_center()
-            .child(Icon::new(icon).size(IconSize::XSmall).color(icon_color))
-            .child(
-                Label::new(operation_label)
-                    .size(LabelSize::XSmall)
-                    .weight(gpui::FontWeight::SEMIBOLD),
-            )
-            .child(
-                div().flex_1().min_w_0().overflow_hidden().child(
-                    Label::new(first_line)
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted)
-                        .truncate(),
-                ),
-            );
-
-        if has_multiple_lines {
-            header = header.child(
-                IconButton::new(
-                    "output-expand",
-                    if expanded {
-                        IconName::ChevronDown
-                    } else {
-                        IconName::ChevronRight
-                    },
-                )
-                .size(ButtonSize::Compact)
-                .style(ButtonStyle::Transparent)
-                .color(Color::Muted)
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    if let Some(op_output) = &mut this.operations.last_operation_output {
-                        op_output.expanded = !op_output.expanded;
-                    }
-                    cx.notify();
-                })),
-            );
-        }
-
-        header = header.child(
-            IconButton::new("output-dismiss", IconName::X)
-                .size(ButtonSize::Compact)
-                .style(ButtonStyle::Transparent)
-                .color(Color::Muted)
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.operations.last_operation_output = None;
-                    cx.notify();
-                })),
-        );
-
-        bar = bar.child(header);
-
-        if expanded {
-            bar = bar.child(
-                div()
-                    .id("operation-output-content")
-                    .w_full()
-                    .max_h(px(120.))
-                    .overflow_y_scroll()
-                    .px(px(10.))
-                    .pb(px(6.))
-                    .child(
-                        div()
-                            .font_family("Lilex")
-                            .text_xs()
-                            .text_color(colors.text_muted)
-                            .whitespace_nowrap()
-                            .child(full_output),
-                    ),
-            );
-        }
-
-        Some(bar.into_any_element())
     }
 
     pub(super) fn retry_git_operation(
