@@ -645,6 +645,21 @@ impl DetailPanel {
         cx.notify();
     }
 
+/// Resolve a virtualized row by identity after list/commit reordering.
+/// Never turn a stale index into a click on a different file.
+fn resolve_file_click_index(
+    files: &[FileDiff],
+    same_commit: bool,
+    index: usize,
+    path: &std::path::Path,
+) -> Option<usize> {
+    if same_commit && files.get(index).is_some_and(|file| file.path == path) {
+        Some(index)
+    } else {
+        files.iter().position(|file| file.path == path)
+    }
+}
+
     /// Revalidate a virtualized file row against the current commit snapshot.
     fn open_file_from_row(
         &mut self,
@@ -654,13 +669,12 @@ impl DetailPanel {
         cx: &mut Context<Self>,
     ) {
         let actual_index = self.commit_diff.as_ref().and_then(|diff| {
-            if self.commit.as_ref().map(|commit| commit.oid) == expected_commit
-                && diff.files.get(index).is_some_and(|file| file.path == path)
-            {
-                Some(index)
-            } else {
-                diff.files.iter().position(|file| file.path == path)
-            }
+            resolve_file_click_index(
+                &diff.files,
+                self.commit.as_ref().map(|commit| commit.oid) == expected_commit,
+                index,
+                path,
+            )
         });
         if let Some(actual_index) = actual_index {
             self.selected_file_index = Some(actual_index);
@@ -2680,6 +2694,26 @@ mod tests {
     }
 
     // --- FileViewMode tests ---
+
+    #[test]
+    fn history_click_resolves_file_identity_after_reordering() {
+        let files = vec![
+            make_file_diff("b.cs", FileChangeKind::Modified),
+            make_file_diff("a.cs", FileChangeKind::Modified),
+        ];
+        assert_eq!(
+            resolve_file_click_index(&files, true, 0, std::path::Path::new("b.cs")),
+            Some(0)
+        );
+        assert_eq!(
+            resolve_file_click_index(&files, false, 0, std::path::Path::new("a.cs")),
+            Some(1)
+        );
+        assert_eq!(
+            resolve_file_click_index(&files, false, 0, std::path::Path::new("deleted.cs")),
+            None
+        );
+    }
 
     #[test]
     fn test_file_view_mode_default_is_flat() {
