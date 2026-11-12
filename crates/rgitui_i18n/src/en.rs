@@ -78,6 +78,7 @@ english_messages! {
     "changes.no_matches" => "No matching files",
     "changes.only_staged" => "Selected",
     "changes.preview_staged" => "Staged diff",
+    "changes.select_all" => "Select all",
     "changes.sort.path" => "By path",
     "changes.sort.status" => "By status",
     "changes.tab" => "Changes",
