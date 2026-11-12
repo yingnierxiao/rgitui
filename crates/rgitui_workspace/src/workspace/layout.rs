@@ -892,41 +892,7 @@ impl Render for Workspace {
                                             .min_h_0()
                                             .child(active_tab.sidebar.clone().cached(fill_container())),
                                     )
-                                    .child(
-                                        div()
-                                            .v_flex()
-                                            .h(px(260.))
-                                            .flex_shrink_0()
-                                            .border_t_1()
-                                            .border_color(colors.border_variant)
-                                            .when(detail_focused, |el| {
-                                                el.border_t_2().border_color(focus_accent)
-                                            })
-                                            .child(
-                                                div()
-                                                    .h_flex()
-                                                    .h(px(26.))
-                                                    .px(px(8.))
-                                                    .items_center()
-                                                    .bg(colors.toolbar_background)
-                                                    .child(
-                                                        Label::new(t!("common.details"))
-                                                            .size(LabelSize::XSmall)
-                                                            .weight(gpui::FontWeight::SEMIBOLD),
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .min_h_0()
-                                                    .child(
-                                                        active_tab
-                                                            .detail_panel
-                                                            .clone()
-                                                            .cached(fill_container()),
-                                                    ),
-                                            ),
-                                    ),
+
                             )
                             // Resize handle straddles the right border
                             .child(
