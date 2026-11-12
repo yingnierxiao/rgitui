@@ -192,6 +192,8 @@ pub(super) struct ProjectTab {
     pub global_search_view: Entity<crate::GlobalSearchView>,
     pub right_panel_mode: RightPanelMode,
     pub bottom_panel_mode: BottomPanelMode,
+    /// Right-click file inspection waiting for its ordinary diff to finish.
+    pub pending_file_inspection: Option<(String, BottomPanelMode)>,
     pub caches: ViewCaches,
     pub inspecting_worktree: Option<InspectingWorktree>,
 }
