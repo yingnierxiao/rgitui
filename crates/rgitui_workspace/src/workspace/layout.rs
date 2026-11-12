@@ -511,7 +511,8 @@ impl Render for Workspace {
             .stash_count(stash_count)
             .repo_path(repo_path_display)
             .loading(!self.operations.active_operations.is_empty())
-            .error(self.operations.last_failed_git_operation.is_some())
+            .error(self.operations.active_git_operation.is_none()
+                && self.operations.last_failed_git_operation.is_some())
             .head_detached(head_detached);
         if !repo_state.is_clean() {
             status_bar = status_bar.repo_state_label(repo_state.label().translated());
@@ -521,20 +522,22 @@ impl Render for Workspace {
         // the bottom after the short-lived generic status message expires.
         // Detailed Git output is available via the status-bar tooltip.
         if let Some(update) = self.operations.active_git_operation.as_ref() {
-            status_bar = status_bar.operation_message(update.summary.translated());
+            status_bar = status_bar.operation_message(update.summary.translated().to_string());
         } else if let Some(failed) = self.operations.last_failed_git_operation.as_ref() {
-            status_bar = status_bar.operation_message(failed.summary.translated());
+            status_bar = status_bar.operation_message(failed.summary.translated().to_string());
             if let Some(details) = failed.details.as_ref() {
-                status_bar = status_bar.operation_details(details.translated());
+                status_bar = status_bar.operation_details(details.translated().to_string());
             }
             if failed.retryable {
                 let retry = failed.clone();
                 let workspace = cx.entity();
                 status_bar = status_bar.on_retry(move |_, _, cx| {
-                    workspace.update(cx, |this, cx| {
-                        this.retry_git_operation(&retry, cx);
-                        cx.notify();
-                    }).ok();
+                    workspace
+                        .update(cx, |this, cx| {
+                            this.retry_git_operation(&retry, cx);
+                            cx.notify();
+                        })
+                        .ok();
                 });
             }
         } else if let Some(msg) = &self.status_message {
