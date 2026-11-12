@@ -241,6 +241,18 @@ impl Workspace {
     /// vertically. Preserve the old ToggleGraph command as a tab shortcut.
     pub(super) fn set_graph_hidden(&mut self, hidden: bool, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            // A historical commit's diff, blame and file history must not
+            // remain visible after switching back to the working-tree Changes
+            // tab. Clearing the diff also advances its request generation, so
+            // an in-flight historical fetch cannot repopulate the old view.
+            if hidden && tab.right_panel_mode == RightPanelMode::History {
+                tab.pending_file_inspection = None;
+                tab.bottom_panel_mode = BottomPanelMode::Diff;
+                tab.diff_viewer.update(cx, |view, cx| view.clear(cx));
+                tab.blame_view.update(cx, |view, cx| view.clear(cx));
+                tab.file_history_view.update(cx, |view, cx| view.clear(cx));
+                tab.detail_panel.update(cx, |view, cx| view.clear(cx));
+            }
             tab.right_panel_mode = if hidden {
                 RightPanelMode::Details
             } else {
