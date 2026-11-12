@@ -2671,7 +2671,13 @@ pub(super) fn subscribe_detail_panel(
         move |this, _dp, event: &DetailPanelEvent, cx| match event {
             DetailPanelEvent::FileSelected(file_diff, path, source) => {
                 if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.project == project) {
+                    // The selected history file is authoritative. Drop any
+                    // visible inspection belonging to the previous selection;
+                    // per-file cache entries remain available for later reuse.
                     tab.bottom_panel_mode = BottomPanelMode::Diff;
+                    tab.pending_file_inspection = None;
+                    tab.blame_view.update(cx, |view, cx| view.clear(cx));
+                    tab.file_history_view.update(cx, |view, cx| view.clear(cx));
                     cx.notify();
                 }
                 let p = path.clone();
