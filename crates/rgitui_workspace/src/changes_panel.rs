@@ -373,6 +373,36 @@ fn selected_virtual_paths(
         .collect()
 }
 
+/// Discard targets come from highlighted rows, never from commit checkboxes.
+/// If any highlighted file is staged or conflicted, reject the entire batch.
+fn discard_target_paths(
+    rows: &[ChangeRow],
+    visible: &[usize],
+    selected: &HashSet<PathBuf>,
+    clicked: &Path,
+) -> Vec<PathBuf> {
+    let highlighted = selected.contains(clicked);
+    let candidates = visible
+        .iter()
+        .filter_map(|index| rows.get(*index))
+        .filter(|row| {
+            if highlighted {
+                selected.contains(&row.path)
+            } else {
+                row.path == clicked
+            }
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty()
+        || candidates
+            .iter()
+            .any(|row| row.has_conflict() || !can_discard_to_head(row))
+    {
+        return Vec::new();
+    }
+    candidates.into_iter().map(|row| row.path.clone()).collect()
+}
+
 /// Build an explicit snapshot independent of the list filter and of Git
 /// index mutations. This function is pure and safe to unit test directly.
 fn build_commit_selection(
@@ -1584,24 +1614,19 @@ impl Render for ChangesPanel {
                         // Discard acts on highlighted list rows, NOT commit
                         // inclusion checkboxes. Never silently discard a subset
                         // if another selected row is staged or conflicted.
-                        let highlighted = if self.selected_paths.contains(&row.path) {
-                            self.visible
+                        let paths = discard_target_paths(
+                            &self.rows,
+                            &self.visible,
+                            &self.selected_paths,
+                            &row.path,
+                        );
+                        if !paths.is_empty() {
+                            let paths = paths
                                 .iter()
-                                .filter_map(|index| self.rows.get(*index))
-                                .filter(|candidate| self.selected_paths.contains(&candidate.path))
-                                .collect::<Vec<_>>()
-                        } else {
-                            vec![&row]
-                        };
-                        if highlighted.iter().all(|candidate| {
-                            !candidate.has_conflict() && can_discard_to_head(candidate)
-                        }) {
-                            let paths = highlighted
-                                .iter()
-                                .map(|candidate| candidate.path.to_string_lossy().to_string())
+                                .map(|path| path.to_string_lossy().to_string())
                                 .collect::<Vec<_>>();
                             let label = if paths.len() > 1 {
-                                format!("{} ({} files)", t!("changes.menu.discard"), paths.len())
+                                format!("{} ({} files)", t!("changes.menu.discard").to_string(), paths.len())
                                     .into()
                             } else {
                                 t!("changes.menu.discard")
@@ -1962,6 +1987,43 @@ mod tests {
         assert!(!conflict_actions.unstage);
         assert!(!conflict_actions.discard);
         assert!(!conflict_actions.staged_diff);
+    }
+
+    #[test]
+    fn batch_discard_uses_highlight_and_rejects_staged_siblings() {
+        let rows = vec![
+            ChangeRow {
+                path: PathBuf::from("a.rs"),
+                staged: None,
+                unstaged: Some(file("a.rs", FileChangeKind::Modified)),
+            },
+            ChangeRow {
+                path: PathBuf::from("b.rs"),
+                staged: None,
+                unstaged: Some(file("b.rs", FileChangeKind::Modified)),
+            },
+            ChangeRow {
+                path: PathBuf::from("c.rs"),
+                staged: Some(file("c.rs", FileChangeKind::Modified)),
+                unstaged: Some(file("c.rs", FileChangeKind::Modified)),
+            },
+        ];
+        let visible = vec![0, 1, 2];
+        let selected = HashSet::from([PathBuf::from("a.rs"), PathBuf::from("b.rs")]);
+        assert_eq!(
+            discard_target_paths(&rows, &visible, &selected, Path::new("a.rs")),
+            vec![PathBuf::from("a.rs"), PathBuf::from("b.rs")]
+        );
+        assert!(discard_target_paths(&rows, &visible, &selected, Path::new("c.rs"))
+            .is_empty());
+        let unsafe_selection = HashSet::from([PathBuf::from("a.rs"), PathBuf::from("c.rs")]);
+        assert!(discard_target_paths(
+            &rows,
+            &visible,
+            &unsafe_selection,
+            Path::new("a.rs"),
+        )
+        .is_empty());
     }
 
     #[test]
