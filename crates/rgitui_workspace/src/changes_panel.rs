@@ -195,6 +195,7 @@ fn can_discard_to_head(row: &ChangeRow) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ChangeContextMenuActions {
     conflict: bool,
+    inspect: bool,
     staged_diff: bool,
     stage: bool,
     unstage: bool,
@@ -206,6 +207,8 @@ impl ChangeContextMenuActions {
         let conflict = row.has_conflict();
         Self {
             conflict,
+            inspect: !conflict
+                && !matches!(row.kind(), FileChangeKind::Untracked | FileChangeKind::UntrackedDirectory),
             staged_diff: !conflict && row.staged_preview_event().is_some(),
             stage: !conflict && row.unstaged.is_some(),
             unstage: !conflict && row.staged.is_some(),
@@ -216,6 +219,7 @@ impl ChangeContextMenuActions {
     fn height(self) -> f32 {
         // Open (or conflict resolver), copy path, plus the conditional actions.
         let item_count = 2
+            + (self.inspect as usize) * 2
             + self.staged_diff as usize
             + self.stage as usize
             + self.unstage as usize
@@ -1429,6 +1433,53 @@ impl Render for ChangesPanel {
                         ),
                     );
 
+                    // History and blame use the same Workspace commands as
+                    // the bottom tabs. They are computed only when opened.
+                    if actions.inspect {
+                        let sidebar = weak_sidebar.clone();
+                        let panel_entity = weak_panel.clone();
+                        let path = row.path.to_string_lossy().to_string();
+                        let staged = row.unstaged.is_none();
+                        menu = menu.item(
+                            ContextMenuItem::new(t!("workspace.bottom.history")).on_click(
+                                move |_, _, cx| {
+                                    panel_entity.update(cx, |this, cx| {
+                                        this.context_menu = None;
+                                        cx.notify();
+                                    }).ok();
+                                    sidebar.update(cx, |_, cx| {
+                                        cx.emit(SidebarEvent::FileInspectionRequested {
+                                            path: path.clone(),
+                                            staged,
+                                            blame: false,
+                                        });
+                                    }).ok();
+                                },
+                            ),
+                        );
+
+                        let sidebar = weak_sidebar.clone();
+                        let panel_entity = weak_panel.clone();
+                        let path = row.path.to_string_lossy().to_string();
+                        menu = menu.item(
+                            ContextMenuItem::new(t!("common.blame")).on_click(
+                                move |_, _, cx| {
+                                    panel_entity.update(cx, |this, cx| {
+                                        this.context_menu = None;
+                                        cx.notify();
+                                    }).ok();
+                                    sidebar.update(cx, |_, cx| {
+                                        cx.emit(SidebarEvent::FileInspectionRequested {
+                                            path: path.clone(),
+                                            staged,
+                                            blame: true,
+                                        });
+                                    }).ok();
+                                },
+                            ),
+                        );
+                    }
+
                     let staged_event = if actions.staged_diff {
                         row.staged_preview_event()
                     } else {
@@ -1831,18 +1882,28 @@ mod tests {
             unstaged: Some(file("conflict.rs", FileChangeKind::Conflicted)),
         };
 
+        let untracked = ChangeRow {
+            path: PathBuf::from("new.rs"),
+            staged: None,
+            unstaged: Some(file("new.rs", FileChangeKind::Untracked)),
+        };
+        assert!(!ChangeContextMenuActions::for_row(&untracked).inspect);
+
         let unstaged_actions = ChangeContextMenuActions::for_row(&unstaged);
+        assert!(unstaged_actions.inspect);
         assert!(unstaged_actions.stage);
         assert!(unstaged_actions.discard);
         assert!(!unstaged_actions.unstage);
         assert!(unstaged_actions.height() > 0.0);
 
         let staged_actions = ChangeContextMenuActions::for_row(&staged);
+        assert!(staged_actions.inspect);
         assert!(staged_actions.unstage);
         assert!(!staged_actions.stage);
         assert!(!staged_actions.discard);
 
         let partial_actions = ChangeContextMenuActions::for_row(&partial);
+        assert!(partial_actions.inspect);
         assert!(partial_actions.stage);
         assert!(partial_actions.unstage);
         assert!(partial_actions.staged_diff);
@@ -1850,6 +1911,7 @@ mod tests {
 
         let conflict_actions = ChangeContextMenuActions::for_row(&conflict);
         assert!(conflict_actions.conflict);
+        assert!(!conflict_actions.inspect);
         assert!(!conflict_actions.stage);
         assert!(!conflict_actions.unstage);
         assert!(!conflict_actions.discard);
