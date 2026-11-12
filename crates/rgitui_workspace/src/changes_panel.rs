@@ -1426,7 +1426,21 @@ impl Render for ChangesPanel {
 
         if let Some(menu_state) = self.context_menu.clone() {
             let row = self.rows.iter().find(|row| row.path == menu_state.path).cloned();
-            let actions = row.as_ref().map(ChangeContextMenuActions::for_row);
+            let actions = row.as_ref().map(|row| {
+                let mut actions = ChangeContextMenuActions::for_row(row);
+                if actions.discard
+                    && discard_target_paths(
+                        &self.rows,
+                        &self.visible,
+                        &self.selected_paths,
+                        &row.path,
+                    )
+                    .is_empty()
+                {
+                    actions.discard = false;
+                }
+                actions
+            });
             let menu_height = actions.map_or(0.0, ChangeContextMenuActions::height);
             let menu_size = Size::new(
                 px(CHANGE_CONTEXT_MENU_WIDTH),
