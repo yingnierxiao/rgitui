@@ -1051,7 +1051,9 @@ impl DetailPanel {
                         let selected = selected_file_index == Some(actual_file_index);
                         let weak = weak.clone();
                         let row_path = diff_snapshot.as_ref().and_then(|diff| {
-                            diff.files.get(actual_file_index).map(|file| file.path.clone())
+                            diff.files
+                                .get(actual_file_index)
+                                .map(|file| file.path.clone())
                         });
                         let dir_path = row.dir_path.clone();
 
@@ -1254,8 +1256,10 @@ impl DetailPanel {
                                 let actual_file_index = file.file_index;
                                 let selected = selected_file_index == Some(actual_file_index);
                                 let row_path = diff_snapshot.as_ref().and_then(|diff| {
-                            diff.files.get(actual_file_index).map(|file| file.path.clone())
-                        });
+                                    diff.files
+                                        .get(actual_file_index)
+                                        .map(|file| file.path.clone())
+                                });
                                 div()
                                     .id(ElementId::NamedInteger("detail-file".into(), ix as u64))
                                     .h_flex()
