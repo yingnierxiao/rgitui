@@ -74,6 +74,8 @@ pub enum SidebarEvent {
     StageAll,
     UnstageAll,
     DiscardFile(String),
+    /// Discard explicitly highlighted file rows, independent of commit checkboxes.
+    DiscardFiles(Vec<String>),
     ConflictFileSelected(String),
     OpenRepo,
     ToggleDir(String), // dir_key: "staged:path" or "unstaged:path"
