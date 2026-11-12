@@ -386,8 +386,7 @@ impl GitProject {
                         // it here is what lets the poll loop skip that scan
                         // while nothing is happening, instead of walking every
                         // loose ref ten times a minute forever.
-                        let dominated_by_git = event
-                            .paths
+                        let dominated_by_git = paths
                             .iter()
                             .all(|p| p.components().any(|c| c.as_os_str() == ".git"));
                         if dominated_by_git {
@@ -421,8 +420,7 @@ impl GitProject {
                             if repos.all_ignored(&paths) {
                                 return;
                             }
-                            event
-                                .paths
+                            paths
                                 .iter()
                                 .filter_map(|path| repos.owner_for_path(path))
                                 .collect::<HashSet<_>>()
