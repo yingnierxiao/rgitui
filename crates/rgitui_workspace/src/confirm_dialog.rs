@@ -12,6 +12,7 @@ use crate::CommandId;
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConfirmAction {
     DiscardFile(String),
+    DiscardFiles(Vec<String>),
     DiscardAll,
     CleanUntracked,
     ForcePush,
@@ -95,7 +96,7 @@ impl ConfirmDialog {
         matches!(
             &self.action,
             Some(
-                ConfirmAction::DiscardFile(_)
+                ConfirmAction::DiscardFile(_) | ConfirmAction::DiscardFiles(_)
                     | ConfirmAction::DiscardAll
                     | ConfirmAction::CleanUntracked
                     | ConfirmAction::BranchDelete(_)
@@ -128,7 +129,7 @@ impl ConfirmDialog {
     /// The confirm button's label for `action`, in the active language.
     fn confirm_label(action: &Option<ConfirmAction>) -> SharedString {
         match action {
-            Some(ConfirmAction::DiscardFile(_) | ConfirmAction::DiscardAll) => {
+            Some(ConfirmAction::DiscardFile(_) | ConfirmAction::DiscardFiles(_) | ConfirmAction::DiscardAll) => {
                 t!("confirm.discard")
             }
             Some(ConfirmAction::CleanUntracked) => t!("confirm.clean"),
@@ -153,6 +154,19 @@ impl ConfirmDialog {
                 t!("confirm.title.discard_file"),
                 t!("confirm.body.discard_file", path = path),
             ),
+            ConfirmAction::DiscardFiles(paths) => {
+                let limit = 8;
+                let items = paths.iter().take(limit).cloned().collect::<Vec<_>>();
+                let mut details = format!(
+                    "Discard changes in {} selected files?\\n\\n{}",
+                    paths.len(),
+                    items.join("\\n"),
+                );
+                if paths.len() > limit {
+                    details.push_str(&format!("\\n... and {} more", paths.len() - limit));
+                }
+                (t!("confirm.title.discard_file"), details.into())
+            }
             ConfirmAction::DiscardAll => (
                 t!("confirm.title.discard_all"),
                 t!("confirm.body.discard_all"),
@@ -384,6 +398,7 @@ mod tests {
     fn confirm_action_all_variants_clone() {
         let actions = vec![
             ConfirmAction::DiscardFile("foo.txt".into()),
+            ConfirmAction::DiscardFiles(vec!["foo.txt".into(), "bar.txt".into()]),
             ConfirmAction::DiscardAll,
             ConfirmAction::CleanUntracked,
             ConfirmAction::ForcePush,
@@ -433,7 +448,7 @@ mod tests {
         fn check_destructive(action: &ConfirmAction) -> bool {
             matches!(
                 action,
-                ConfirmAction::DiscardFile(_)
+                ConfirmAction::DiscardFile(_) | ConfirmAction::DiscardFiles(_)
                     | ConfirmAction::DiscardAll
                     | ConfirmAction::CleanUntracked
                     | ConfirmAction::BranchDelete(_)
@@ -516,7 +531,7 @@ mod tests {
                 a => {
                     if matches!(
                         a,
-                        ConfirmAction::DiscardFile(_)
+                        ConfirmAction::DiscardFile(_) | ConfirmAction::DiscardFiles(_)
                             | ConfirmAction::DiscardAll
                             | ConfirmAction::CleanUntracked
                             | ConfirmAction::BranchDelete(_)
