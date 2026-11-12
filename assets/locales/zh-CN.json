@@ -356,6 +356,7 @@
     "git.pull.detail": "拉取后已刷新仓库状态。",
     "git.pull.done": "已从 '{remote}' 拉取 '{branch}'",
     "git.pull.failed": "从 '{remote}' 拉取失败",
+    "git.pull.local_changes_blocked": "拉取已停止：本地修改可能被覆盖。请先提交或手动贮藏修改，再重试拉取",
     "git.pull.not_started": "拉取无法启动",
     "git.pull.running": "正在从 '{remote}' 拉取 '{branch}'…",
     "git.pull.up_to_date": "'{branch}' 已与 '{remote}' 保持同步",
