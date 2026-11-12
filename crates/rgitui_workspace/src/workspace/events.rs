@@ -1509,6 +1509,8 @@ pub(super) fn subscribe_sidebar(
                         let viewer = tab.diff_viewer.read(cx);
                         if viewer.file_path() == Some(path.as_str()) && viewer.diff().is_some() {
                             if index == this.active_tab {
+                                // The right-click action is "open", not a toggle.
+                                this.tabs[index].bottom_panel_mode = BottomPanelMode::Diff;
                                 this.execute_command(
                                     if *blame { crate::CommandId::Blame }
                                     else { crate::CommandId::FileHistory },
@@ -2805,25 +2807,19 @@ pub(super) fn subscribe_diff_viewer(
         move |this, _dv, event: &DiffViewerEvent, cx| {
             if let DiffViewerEvent::DiffChanged {
                 path,
-                commit_id,
-                generation,
+                ..
             } = event
             {
-                let owning_tab = this
-                    .tabs
-                    .iter_mut()
-                    .find(|tab| tab.diff_viewer == diff_viewer_ref);
-                let repo_path = if let Some(tab) = owning_tab {
+                if let Some(tab) = this.tabs.iter_mut()
+                    .find(|tab| tab.diff_viewer == diff_viewer_ref)
+                {
                     if matches!(
                         tab.bottom_panel_mode,
                         BottomPanelMode::Blame | BottomPanelMode::FileHistory
                     ) {
                         tab.bottom_panel_mode = BottomPanelMode::Diff;
                     }
-                    tab.effective_repo_path(cx)
-                } else {
-                    project.read(cx).repo_path().to_path_buf()
-                };
+                }
 
                 // A context-menu request may be waiting for this file's
                 // ordinary diff. Ignore the loading notification; only the
