@@ -25,6 +25,15 @@ fn is_remote_ahead_rejection(error: &str) -> bool {
             || message.contains("tip of your current branch is behind"))
 }
 
+/// Git refuses to start a merge when it would overwrite existing local edits.
+/// This is not an index merge conflict: users must commit or stash those edits
+/// before retrying, and no conflict-resolution or abort action is appropriate.
+fn is_pull_blocked_by_local_edits(error: &str) -> bool {
+    let text = error.to_ascii_lowercase();
+    text.contains("your local changes to the following files would be overwritten by merge")
+        || text.contains("your local changes to the following files would be overwritten by checkout")
+}
+
 /// Attempt to recover a normal rejected push by incorporating the exact
 /// destination ref. Never force push and never silently overwrite user changes.
 ///
@@ -224,6 +233,16 @@ fn pull_arguments<'a>(remote: &'a str, branch: &'a str, auto_stash: bool) -> Vec
 #[cfg(test)]
 mod pull_arguments_tests {
     use super::pull_arguments;
+
+    #[test]
+    fn blocked_pull_is_not_a_merge_conflict_and_requires_manual_action() {
+        let error = "Your local changes to the following files would be overwritten by merge:\n\tAssets/RS.cs\nPlease commit your changes or stash them before you merge.";
+        assert!(super::is_pull_blocked_by_local_edits(error));
+        assert!(!super::is_pull_blocked_by_local_edits(
+            "CONFLICT (content): Merge conflict in Assets/RS.cs"
+        ));
+        assert!(!super::is_pull_blocked_by_local_edits("Authentication failed"));
+    }
 
     #[test]
     fn normal_pull_preserves_git_configuration() {
@@ -665,14 +684,29 @@ impl GitProject {
                         }
                         Err(e) => {
                             log::error!("Pull failed: {}", e);
+                            let blocked_by_local_edits =
+                                is_pull_blocked_by_local_edits(&e.to_string());
                             this.fail_op(
                                 operation_id,
                                 GitOperationKind::Pull,
-                                msg!("git.pull.failed", remote = &remote_name),
+                                if blocked_by_local_edits {
+                                    msg!("git.pull.local_changes_blocked", remote = &remote_name)
+                                } else {
+                                    msg!("git.pull.failed", remote = &remote_name)
+                                },
                                 error_message(&e),
-                                (Some(remote_name.clone()), Some(branch_name.clone()), true),
+                                (
+                                    Some(remote_name.clone()),
+                                    Some(branch_name.clone()),
+                                    !blocked_by_local_edits,
+                                ),
                                 cx,
                             );
+                            // A rejected Pull may still fetch refs before Git
+                            // refuses the merge. Reconcile both the changed
+                            // remote refs and status of local edits in the UI.
+                            // This is read-only: never reset, pop or create a stash.
+                            this.refresh(cx).detach();
                         }
                     }
                     cx.notify();
