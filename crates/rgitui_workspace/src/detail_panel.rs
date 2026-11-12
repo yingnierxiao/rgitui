@@ -1024,11 +1024,8 @@ impl DetailPanel {
         // means identity, i.e. unfiltered diff order). Only the visible window is
         // cloned, inside the closure.
         let flat_rows = cached.flat_rows.clone();
-        let file_paths: Arc<Vec<std::path::PathBuf>> = Arc::new(
-            self.commit_diff.as_ref().map_or_else(Vec::new, |diff| {
-                diff.files.iter().map(|file| file.path.clone()).collect()
-            }),
-        );
+        // Share the existing immutable snapshot; clone only visible row paths.
+        let diff_snapshot = self.commit_diff.clone();
         let display_order: Option<Arc<Vec<usize>>> = match filtered {
             FilteredFiles::All { .. } => None,
             FilteredFiles::Matched(indices) => Some(Arc::new(indices.clone())),
@@ -1053,7 +1050,9 @@ impl DetailPanel {
                         let actual_file_index = row.file_index;
                         let selected = selected_file_index == Some(actual_file_index);
                         let weak = weak.clone();
-                        let row_path = file_paths.get(actual_file_index).cloned();
+                        let row_path = diff_snapshot.as_ref().and_then(|diff| {
+                            diff.files.get(actual_file_index).map(|file| file.path.clone())
+                        });
                         let dir_path = row.dir_path.clone();
 
                         div()
@@ -1178,11 +1177,8 @@ impl DetailPanel {
         let list_height = file_list_content_height(row_count, row_h);
         let list_min_height = file_list_min_height(row_count, row_h);
         let tree_rows = tree_rows.clone();
-        let file_paths: Arc<Vec<std::path::PathBuf>> = Arc::new(
-            self.commit_diff.as_ref().map_or_else(Vec::new, |diff| {
-                diff.files.iter().map(|file| file.path.clone()).collect()
-            }),
-        );
+        // Share the existing immutable snapshot; clone only visible row paths.
+        let diff_snapshot = self.commit_diff.clone();
 
         let ghost_element_selected = colors.ghost_element_selected;
         let text_accent = colors.text_accent;
@@ -1257,7 +1253,9 @@ impl DetailPanel {
                             CachedTreeRowKind::File(file) => {
                                 let actual_file_index = file.file_index;
                                 let selected = selected_file_index == Some(actual_file_index);
-                                let row_path = file_paths.get(actual_file_index).cloned();
+                                let row_path = diff_snapshot.as_ref().and_then(|diff| {
+                            diff.files.get(actual_file_index).map(|file| file.path.clone())
+                        });
                                 div()
                                     .id(ElementId::NamedInteger("detail-file".into(), ix as u64))
                                     .h_flex()
