@@ -410,12 +410,25 @@ impl GitProject {
                                 if log::log_enabled!(log::Level::Debug)
                                     && callback_log_samples.fetch_add(1, Ordering::Relaxed) < 12
                                 {
-                                    log::debug!(
-                                        "watcher accepted worktree event: kind={:?} paths={:?} owners={:?}",
-                                        event.kind,
-                                        event.paths,
-                                        dirty_roots,
-                                    );
+                                    // Keep the informative part at the start.
+                                    // PowerShell can truncate long stderr lines,
+                                    // and full absolute paths hid the actual
+                                    // filenames in earlier P0 diagnostics.
+                                    for path in &event.paths {
+                                        let relative = path
+                                            .strip_prefix(&callback_main_root)
+                                            .unwrap_or(path.as_path());
+                                        let filename = path
+                                            .file_name()
+                                            .map(|name| name.to_string_lossy())
+                                            .unwrap_or_default();
+                                        log::debug!(
+                                            "watch path: file={} kind={:?} relative={}",
+                                            filename,
+                                            event.kind,
+                                            relative.display(),
+                                        );
+                                    }
                                 }
                                 callback_worktree_events.fetch_add(1, Ordering::Relaxed);
                                 if dirty_roots.is_empty() {
