@@ -645,20 +645,20 @@ impl DetailPanel {
         cx.notify();
     }
 
-/// Resolve a virtualized row by identity after list/commit reordering.
-/// Never turn a stale index into a click on a different file.
-fn resolve_file_click_index(
-    files: &[FileDiff],
-    same_commit: bool,
-    index: usize,
-    path: &std::path::Path,
-) -> Option<usize> {
-    if same_commit && files.get(index).is_some_and(|file| file.path == path) {
-        Some(index)
-    } else {
-        files.iter().position(|file| file.path == path)
+    /// Resolve a virtualized row by identity after list/commit reordering.
+    /// Never turn a stale index into a click on a different file.
+    fn resolve_file_click_index(
+        files: &[FileDiff],
+        same_commit: bool,
+        index: usize,
+        path: &std::path::Path,
+    ) -> Option<usize> {
+        if same_commit && files.get(index).is_some_and(|file| file.path == path) {
+            Some(index)
+        } else {
+            files.iter().position(|file| file.path == path)
+        }
     }
-}
 
     /// Revalidate a virtualized file row against the current commit snapshot.
     fn open_file_from_row(
@@ -669,7 +669,7 @@ fn resolve_file_click_index(
         cx: &mut Context<Self>,
     ) {
         let actual_index = self.commit_diff.as_ref().and_then(|diff| {
-            resolve_file_click_index(
+            Self::resolve_file_click_index(
                 &diff.files,
                 self.commit.as_ref().map(|commit| commit.oid) == expected_commit,
                 index,
@@ -2702,15 +2702,15 @@ mod tests {
             make_file_diff("a.cs", FileChangeKind::Modified),
         ];
         assert_eq!(
-            resolve_file_click_index(&files, true, 0, std::path::Path::new("b.cs")),
+            DetailPanel::resolve_file_click_index(&files, true, 0, std::path::Path::new("b.cs")),
             Some(0)
         );
         assert_eq!(
-            resolve_file_click_index(&files, false, 0, std::path::Path::new("a.cs")),
+            DetailPanel::resolve_file_click_index(&files, false, 0, std::path::Path::new("a.cs")),
             Some(1)
         );
         assert_eq!(
-            resolve_file_click_index(&files, false, 0, std::path::Path::new("deleted.cs")),
+            DetailPanel::resolve_file_click_index(&files, false, 0, std::path::Path::new("deleted.cs")),
             None
         );
     }
