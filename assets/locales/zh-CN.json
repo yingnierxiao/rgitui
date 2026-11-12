@@ -111,7 +111,7 @@
     "confirm.body.delete_tag": "确定要删除标签“{tag}”吗？此操作无法撤销。",
     "confirm.body.discard_all": "这将永久丢弃所有未提交的更改。",
     "confirm.body.discard_file": "确定要丢弃对 {path} 的更改吗？",
-    "confirm.body.discard_selected": "确定丢弃以下 {count} 个选中文件的修改吗？\\n\\n{paths}",
+    "confirm.body.discard_selected": "确定丢弃以下 {count} 个选中文件的修改吗？\n\n{paths}",
     "confirm.body.drop_stash": "确定要丢弃 {stash} 吗？此操作无法撤销。",
     "confirm.body.force_push": "这将覆盖远程分支。确定要继续吗？",
     "confirm.body.remove_remote": "要从此仓库移除远程“{remote}”及其配置的 URL 吗？",
