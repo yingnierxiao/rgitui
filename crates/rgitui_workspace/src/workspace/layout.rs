@@ -3,12 +3,11 @@ use gpui::{
     canvas, div, px, App, ClickEvent, Context, CursorStyle, DragMoveEvent, ElementId, MouseButton,
     MouseDownEvent, Render, SharedString, StyleRefinement, Window,
 };
-use rgitui_git::GitOperationState;
 use rgitui_i18n::{t, tp};
 use rgitui_theme::{ActiveTheme, Color, StyledExt};
 use rgitui_ui::{
     Button, ButtonSize, ButtonStyle, Icon, IconButton, IconName, IconSize, Label, LabelSize,
-    Spinner, SpinnerSize, Tab, TabBar, Tooltip,
+    Tab, TabBar, Tooltip,
 };
 
 use crate::keymap;
@@ -518,99 +517,33 @@ impl Render for Workspace {
             status_bar = status_bar.repo_state_label(repo_state.label().translated());
         }
 
-        if let Some(msg) = &self.status_message {
+        // Always prioritize the active operation. A failure stays visible at
+        // the bottom after the short-lived generic status message expires.
+        // Detailed Git output is available via the status-bar tooltip.
+        if let Some(update) = self.operations.active_git_operation.as_ref() {
+            status_bar = status_bar.operation_message(update.summary.translated());
+        } else if let Some(failed) = self.operations.last_failed_git_operation.as_ref() {
+            status_bar = status_bar.operation_message(failed.summary.translated());
+            if let Some(details) = failed.details.as_ref() {
+                status_bar = status_bar.operation_details(details.translated());
+            }
+            if failed.retryable {
+                let retry = failed.clone();
+                let workspace = cx.entity();
+                status_bar = status_bar.on_retry(move |_, _, cx| {
+                    workspace.update(cx, |this, cx| {
+                        this.retry_git_operation(&retry, cx);
+                        cx.notify();
+                    }).ok();
+                });
+            }
+        } else if let Some(msg) = &self.status_message {
             status_bar = status_bar.operation_message(msg.translated().to_string());
         }
 
-        let operation_banner = if let Some(update) = self
-            .operations
-            .active_git_operation
-            .clone()
-            .or_else(|| self.operations.last_failed_git_operation.clone())
-        {
-            let is_failure = update.state == GitOperationState::Failed;
-            let accent = if is_failure {
-                cx.status().error
-            } else {
-                cx.status().info
-            };
-            let bg = if is_failure {
-                cx.status().error_background
-            } else {
-                cx.status().info_background
-            };
-            let icon = if is_failure {
-                IconName::FileConflict
-            } else {
-                IconName::Refresh
-            };
-            let details = update.details.clone();
-
-            Some(
-                div()
-                    .h_flex()
-                    .w_full()
-                    .min_h(px(30.))
-                    .px(px(10.))
-                    .py(px(4.))
-                    .gap(px(6.))
-                    .items_center()
-                    .bg(bg)
-                    .border_b_1()
-                    .border_color(accent)
-                    .child(Icon::new(icon).size(IconSize::Small).color(if is_failure {
-                        Color::Error
-                    } else {
-                        Color::Info
-                    }))
-                    .child(
-                        div()
-                            .v_flex()
-                            .min_w_0()
-                            .flex_1()
-                            .child(
-                                Label::new(update.summary.translated())
-                                    .size(LabelSize::Small)
-                                    .weight(gpui::FontWeight::SEMIBOLD)
-                                    .truncate(),
-                            )
-                            .when_some(details, |el, details| {
-                                el.child(
-                                    Label::new(details.translated())
-                                        .size(LabelSize::XSmall)
-                                        .color(Color::Muted)
-                                        .truncate(),
-                                )
-                            }),
-                    )
-                    .when(is_failure && update.retryable, |el| {
-                        let retry_update = update.clone();
-                        el.child(
-                            Button::new("operation-retry", t!("common.retry"))
-                                .size(ButtonSize::Compact)
-                                .style(ButtonStyle::Filled)
-                                .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
-                                    this.retry_git_operation(&retry_update, cx);
-                                })),
-                        )
-                    })
-                    .when(is_failure, |el| {
-                        el.child(
-                            IconButton::new("operation-dismiss", IconName::X)
-                                .size(ButtonSize::Compact)
-                                .color(Color::Muted)
-                                .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
-                                    this.operations.last_failed_git_operation = None;
-                                    cx.notify();
-                                })),
-                        )
-                    }),
-            )
-        } else {
-            None
-        };
-
-        let operation_output_bar = self.render_operation_output_bar(cx);
+        // Network and other Git operation feedback is in the fixed-height
+        // bottom status bar. Do not insert transient banners above the tabs:
+        // they resize the entire workspace while operations run or fail.
         let update_banner = self.render_update_banner(cx);
         let detached_head_banner =
             detached_head.map(|head| self.render_detached_head_banner(head, cx));
@@ -645,8 +578,6 @@ impl Render for Workspace {
             // Toolbar
             .child(active_tab.toolbar.clone())
             .when_some(update_banner, |el, banner| el.child(banner))
-            .when_some(operation_banner, |el, banner| el.child(banner))
-            .when_some(operation_output_bar, |el, bar| el.child(bar))
             // Conflict state banner (merge/rebase/cherry-pick/revert in progress)
             .when(!repo_state.is_clean(), |el| {
                 let has_conflicts = conflict_count > 0;
@@ -920,39 +851,6 @@ impl Render for Workspace {
                             .flex_1()
                             .min_w_0()
                             .h_full()
-                            // Loading indicator with spinner
-                            .when(!self.operations.active_operations.is_empty(), |el| {
-                                let label: SharedString = self
-                                    .operations
-                                    .active_operations
-                                    .last()
-                                    .map(|op| {
-                                        let label = op.label.translated();
-                                        let elapsed = op.started_at.elapsed().as_secs();
-                                        if elapsed >= 2 {
-                                            SharedString::from(format!("{} ({}s)", label, elapsed))
-                                        } else {
-                                            label
-                                        }
-                                    })
-                                    .unwrap_or_else(|| t!("workspace.loading"));
-
-                                el.child(
-                                    div()
-                                        .h_flex()
-                                        .w_full()
-                                        .h(px(28.))
-                                        .px_3()
-                                        .items_center()
-                                        .gap_2()
-                                        .bg(colors.surface_background)
-                                        .border_b_1()
-                                        .border_color(colors.border_variant)
-                                        .child(
-                                            Spinner::new().size(SpinnerSize::Small).label(label),
-                                        ),
-                                )
-                            })
                             // Bottom panel tabs + content
                             .child({
                                 let tab_bar_bg = colors.toolbar_background;
