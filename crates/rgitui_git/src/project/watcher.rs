@@ -295,6 +295,22 @@ fn should_refresh_after_git_fingerprint_change(
     !git_notification || has_unapplied_status_refresh
 }
 
+/// Unity writes short-lived directory monitor probes during asset refreshes.
+/// Their create/remove notifications are not source edits. Check the exact
+/// generated filename shape, never a whole Unity directory or extension.
+fn is_unity_dir_monitor_sync_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(hex) = name
+        .strip_prefix("~UnityDirMonSyncFile~")
+        .and_then(|name| name.strip_suffix('~'))
+    else {
+        return false;
+    };
+    hex.len() == 32 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn owning_root<'a>(roots: impl Iterator<Item = &'a Path>, path: &Path) -> Option<&'a Path> {
     roots
         .filter(|root| {
@@ -351,6 +367,19 @@ impl GitProject {
             let watcher =
                 notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
                     if let Ok(event) = res {
+                        // Unity's directory-monitor probes are transient, untracked
+                        // files. Ignore only their exact generated names; retain
+                        // other paths in mixed events and all parent-directory
+                        // notifications, which may represent real changes.
+                        let paths = event
+                            .paths
+                            .iter()
+                            .filter(|path| !is_unity_dir_monitor_sync_file(path))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        if paths.is_empty() {
+                            return;
+                        }
                         // A change under `.git` is not a working-tree change,
                         // but it is exactly what the fingerprint scan exists to
                         // detect — a commit, a checkout, a branch move. Noting
@@ -369,7 +398,7 @@ impl GitProject {
                             // object and reflog writes do not change statuses.
                             // Config/ignore files need the conservative path
                             // because they are not in that fingerprint.
-                            if event.paths.iter().any(|path| {
+                            if paths.iter().any(|path| {
                                 git_metadata_affects_status_without_fingerprint(path)
                             }) {
                                 let roots = callback_ignore_repos
@@ -389,7 +418,7 @@ impl GitProject {
                         // even modified ones — are never reported as ignored,
                         // so legitimate changes still pass through.
                         let dirty_roots = if let Ok(repos) = callback_ignore_repos.lock() {
-                            if repos.all_ignored(&event.paths) {
+                            if repos.all_ignored(&paths) {
                                 return;
                             }
                             event
@@ -414,7 +443,7 @@ impl GitProject {
                                     // PowerShell can truncate long stderr lines,
                                     // and full absolute paths hid the actual
                                     // filenames in earlier P0 diagnostics.
-                                    for path in &event.paths {
+                                    for path in &paths {
                                         let relative = path
                                             .strip_prefix(&callback_main_root)
                                             .unwrap_or(path.as_path());
@@ -832,6 +861,29 @@ impl GitProject {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unity_directory_monitor_probe_is_ignored_without_hiding_real_files() {
+        let token = "~UnityDirMonSyncFile~322559ed605ab3b45976f831b7aab4d2~";
+        assert!(is_unity_dir_monitor_sync_file(Path::new(&format!(
+            "UnityProject/Packages/com.coffee.unitask/{token}"
+        ))));
+        assert!(is_unity_dir_monitor_sync_file(Path::new(&format!(
+            "UnityProject/Assets/{token}"
+        ))));
+        assert!(!is_unity_dir_monitor_sync_file(Path::new(
+            "UnityProject/Assets/GameLogic/RS.cs"
+        )));
+        assert!(!is_unity_dir_monitor_sync_file(Path::new(
+            "UnityProject/Assets/~UnityDirMonSyncFile~not-a-probe~"
+        )));
+        assert!(!is_unity_dir_monitor_sync_file(Path::new(
+            "UnityProject/Assets/~UnityDirMonSyncFile~322559ed605ab3b45976f831b7aab4d2~.meta"
+        )));
+        assert!(!is_unity_dir_monitor_sync_file(Path::new(
+            "UnityProject/Packages/com.coffee.unitask"
+        )));
+    }
 
     #[test]
     fn transient_git_metadata_does_not_force_expensive_status_rescan() {
