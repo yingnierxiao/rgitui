@@ -879,21 +879,9 @@ impl Render for Workspace {
                             .when(sidebar_focused, |el| {
                                 el.border_t_2().border_color(focus_accent)
                             })
-                            // Keep repository navigation above commit metadata.
-                            // Changed-file staging moved to the right panel.
-                            .child(
-                                div()
-                                    .v_flex()
-                                    .w_full()
-                                    .h_full()
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_h_0()
-                                            .child(active_tab.sidebar.clone().cached(fill_container())),
-                                    )
-
-                            )
+                            // The sidebar now owns the full height. History
+                            // files are shown only in the center, beside Diff.
+                            .child(active_tab.sidebar.clone().cached(fill_container()))
                             // Resize handle straddles the right border
                             .child(
                                 div()
