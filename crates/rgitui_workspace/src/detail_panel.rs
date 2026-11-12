@@ -645,6 +645,30 @@ impl DetailPanel {
         cx.notify();
     }
 
+    /// Revalidate a virtualized file row against the current commit snapshot.
+    fn open_file_from_row(
+        &mut self,
+        expected_commit: Option<git2::Oid>,
+        index: usize,
+        path: &std::path::Path,
+        cx: &mut Context<Self>,
+    ) {
+        let actual_index = self.commit_diff.as_ref().and_then(|diff| {
+            if self.commit.as_ref().map(|commit| commit.oid) == expected_commit
+                && diff.files.get(index).is_some_and(|file| file.path == path)
+            {
+                Some(index)
+            } else {
+                diff.files.iter().position(|file| file.path == path)
+            }
+        });
+        if let Some(actual_index) = actual_index {
+            self.selected_file_index = Some(actual_index);
+            self.emit_file_selected(cx);
+            cx.notify();
+        }
+    }
+
     /// Closes the changed-files filter and clears its query.
     fn clear_file_search(&mut self, cx: &mut Context<Self>) {
         if self.file_search_query.is_none() && !self.file_search_active {
@@ -986,6 +1010,11 @@ impl DetailPanel {
         // means identity, i.e. unfiltered diff order). Only the visible window is
         // cloned, inside the closure.
         let flat_rows = cached.flat_rows.clone();
+        let file_paths: Arc<Vec<std::path::PathBuf>> = Arc::new(
+            self.commit_diff.as_ref().map_or_else(Vec::new, |diff| {
+                diff.files.iter().map(|file| file.path.clone()).collect()
+            }),
+        );
         let display_order: Option<Arc<Vec<usize>>> = match filtered {
             FilteredFiles::All { .. } => None,
             FilteredFiles::Matched(indices) => Some(Arc::new(indices.clone())),
@@ -1010,6 +1039,7 @@ impl DetailPanel {
                         let actual_file_index = row.file_index;
                         let selected = selected_file_index == Some(actual_file_index);
                         let weak = weak.clone();
+                        let row_path = file_paths.get(actual_file_index).cloned();
                         let dir_path = row.dir_path.clone();
 
                         div()
@@ -1031,15 +1061,14 @@ impl DetailPanel {
                             .cursor_pointer()
                             .on_click(move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
                                 weak.update(cx, |this, cx| {
-                                    if this.commit.as_ref().map(|commit| commit.oid)
-                                        != displayed_commit
-                                    {
-                                        log::debug!("history file click ignored: commit changed during render");
-                                        return;
+                                    if let Some(path) = row_path.as_ref() {
+                                        this.open_file_from_row(
+                                            displayed_commit,
+                                            actual_file_index,
+                                            path,
+                                            cx,
+                                        );
                                     }
-                                    this.selected_file_index = Some(actual_file_index);
-                                    this.emit_file_selected(cx);
-                                    cx.notify();
                                 })
                                 .ok();
                             })
@@ -1135,6 +1164,11 @@ impl DetailPanel {
         let list_height = file_list_content_height(row_count, row_h);
         let list_min_height = file_list_min_height(row_count, row_h);
         let tree_rows = tree_rows.clone();
+        let file_paths: Arc<Vec<std::path::PathBuf>> = Arc::new(
+            self.commit_diff.as_ref().map_or_else(Vec::new, |diff| {
+                diff.files.iter().map(|file| file.path.clone()).collect()
+            }),
+        );
 
         let ghost_element_selected = colors.ghost_element_selected;
         let text_accent = colors.text_accent;
@@ -1209,6 +1243,7 @@ impl DetailPanel {
                             CachedTreeRowKind::File(file) => {
                                 let actual_file_index = file.file_index;
                                 let selected = selected_file_index == Some(actual_file_index);
+                                let row_path = file_paths.get(actual_file_index).cloned();
                                 div()
                                     .id(ElementId::NamedInteger("detail-file".into(), ix as u64))
                                     .h_flex()
@@ -1229,15 +1264,14 @@ impl DetailPanel {
                                     .on_click(
                                         move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
                                             weak.update(cx, |this, cx| {
-                                                if this.commit.as_ref().map(|commit| commit.oid)
-                                                    != displayed_commit
-                                                {
-                                                    log::debug!("history tree file click ignored: commit changed during render");
-                                                    return;
+                                                if let Some(path) = row_path.as_ref() {
+                                                    this.open_file_from_row(
+                                                        displayed_commit,
+                                                        actual_file_index,
+                                                        path,
+                                                        cx,
+                                                    );
                                                 }
-                                                this.selected_file_index = Some(actual_file_index);
-                                                this.emit_file_selected(cx);
-                                                cx.notify();
                                             })
                                             .ok();
                                         },
