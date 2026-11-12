@@ -1069,7 +1069,7 @@ impl DetailPanel {
                                 .get(actual_file_index)
                                 .map(|file| file.path.clone())
                         });
-                        let dir_path = row.dir_path.clone();
+                        let full_path = row_path.as_ref().map(|path| path.to_string_lossy().to_string()).unwrap_or_default();
 
                         div()
                             .id(ElementId::NamedInteger("detail-file".into(), ix as u64))
@@ -1088,6 +1088,7 @@ impl DetailPanel {
                             .when(!selected, |el| el.border_color(border_transparent))
                             .hover(move |s| s.bg(ghost_element_hover))
                             .cursor_pointer()
+                            .tooltip(Tooltip::text(full_path))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 move |_: &MouseDownEvent, _: &mut Window, cx: &mut App| {
@@ -1112,40 +1113,18 @@ impl DetailPanel {
                                     .size(IconSize::XSmall)
                                     .color(row.icon_color),
                             )
-                            // Keep the filename readable even when long
-                            // Unity asset paths would consume the whole row.
+                            // Paths are available in the tooltip. The narrow
+                            // history file list gives its width to the basename.
                             .child(
                                 div()
-                                    .h_flex()
                                     .flex_1()
                                     .min_w_0()
-                                    .gap(px(4.))
                                     .overflow_hidden()
                                     .child(
-                                        div()
-                                            .min_w_0()
-                                            .flex_shrink_0()
-                                            .max_w_full()
-                                            .child(
-                                                Label::new(row.file_name.clone())
-                                                    .size(LabelSize::XSmall)
-                                                    .truncate(),
-                                            ),
-                                    )
-                                    .when(!dir_path.is_empty(), |el| {
-                                        el.child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .overflow_hidden()
-                                                .child(
-                                                    Label::new(dir_path)
-                                                        .size(LabelSize::XSmall)
-                                                        .color(Color::Muted)
-                                                        .truncate(),
-                                                ),
-                                        )
-                                    }),
+                                        Label::new(row.file_name.clone())
+                                            .size(LabelSize::XSmall)
+                                            .truncate(),
+                                    ),
                             )
                             .child(
                                 div()
