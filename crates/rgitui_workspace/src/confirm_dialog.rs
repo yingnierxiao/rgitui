@@ -157,15 +157,18 @@ impl ConfirmDialog {
             ConfirmAction::DiscardFiles(paths) => {
                 let limit = 8;
                 let items = paths.iter().take(limit).cloned().collect::<Vec<_>>();
-                let mut details = format!(
-                    "Discard changes in {} selected files?\\n\\n{}",
-                    paths.len(),
-                    items.join("\\n"),
-                );
+                let mut summary = items.join("\n");
                 if paths.len() > limit {
-                    details.push_str(&format!("\\n... and {} more", paths.len() - limit));
+                    summary.push_str(&format!("\n… +{}", paths.len() - limit));
                 }
-                (t!("confirm.title.discard_file"), details.into())
+                (
+                    t!("confirm.title.discard_selected"),
+                    t!(
+                        "confirm.body.discard_selected",
+                        count = paths.len(),
+                        paths = summary
+                    ),
+                )
             }
             ConfirmAction::DiscardAll => (
                 t!("confirm.title.discard_all"),
