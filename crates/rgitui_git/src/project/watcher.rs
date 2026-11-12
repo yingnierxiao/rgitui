@@ -330,6 +330,9 @@ impl GitProject {
         let git_dirty = Arc::new(AtomicBool::new(false));
         let git_event_count = Arc::new(AtomicUsize::new(0));
         let worktree_event_count = Arc::new(AtomicUsize::new(0));
+        // Cap diagnostic path output per refresh burst. It is only needed to
+        // identify which non-ignored filesystem changes invalidate status.
+        let accepted_event_log_samples = Arc::new(AtomicUsize::new(0));
 
         // One gitignore handle per watched checkout, kept in step with the
         // watched set by the poll loop below.
@@ -341,6 +344,7 @@ impl GitProject {
             let git_dirty_flag = git_dirty.clone();
             let callback_git_events = git_event_count.clone();
             let callback_worktree_events = worktree_event_count.clone();
+            let callback_log_samples = accepted_event_log_samples.clone();
             let callback_ignore_repos = ignore_repos.clone();
             let callback_status_cache = worktree_cache.clone();
             let callback_main_root = repo_path.clone();
@@ -400,6 +404,19 @@ impl GitProject {
                             notify::EventKind::Create(_)
                             | notify::EventKind::Modify(_)
                             | notify::EventKind::Remove(_) => {
+                                // We already know these paths were not all ignored.
+                                // Sample the exact paths before invalidating status,
+                                // without changing existing watcher behavior.
+                                if log::log_enabled!(log::Level::Debug)
+                                    && callback_log_samples.fetch_add(1, Ordering::Relaxed) < 12
+                                {
+                                    log::debug!(
+                                        "watcher accepted worktree event: kind={:?} paths={:?} owners={:?}",
+                                        event.kind,
+                                        event.paths,
+                                        dirty_roots,
+                                    );
+                                }
                                 callback_worktree_events.fetch_add(1, Ordering::Relaxed);
                                 if dirty_roots.is_empty() {
                                     // Unknown paths are conservatively attributed
@@ -466,6 +483,7 @@ impl GitProject {
             let dirty = dirty.clone();
             let git_event_count = git_event_count.clone();
             let worktree_event_count = worktree_event_count.clone();
+            let accepted_event_log_samples = accepted_event_log_samples.clone();
             let repo_path = repo_path.clone();
             let main_git_dir = main_git_dir.clone();
             let common_git_dir = common_git_dir.clone();
@@ -692,6 +710,7 @@ impl GitProject {
                         dirty.swap(false, Ordering::Relaxed);
                         let worktree_events = worktree_event_count.swap(0, Ordering::Relaxed);
                         let git_events = git_event_count.swap(0, Ordering::Relaxed);
+                        accepted_event_log_samples.store(0, Ordering::Relaxed);
                         log::info!(
                             "watcher refresh trigger: worktree={} file_events={} git_events={} debounce={:?} status_epoch={} commits={}",
                             repo_path.display(),
