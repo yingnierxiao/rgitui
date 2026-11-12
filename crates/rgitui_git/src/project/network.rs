@@ -690,7 +690,7 @@ impl GitProject {
                                 operation_id,
                                 GitOperationKind::Pull,
                                 if blocked_by_local_edits {
-                                    msg!("git.pull.local_changes_blocked", remote = &remote_name)
+                                    msg!("git.pull.local_changes_blocked")
                                 } else {
                                     msg!("git.pull.failed", remote = &remote_name)
                                 },
