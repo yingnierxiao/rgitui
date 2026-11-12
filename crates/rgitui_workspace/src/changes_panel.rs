@@ -968,6 +968,7 @@ impl Render for ChangesPanel {
         let has_selectable_rows = self.header_enabled && !self.commit_in_progress;
         let is_committing = self.commit_in_progress;
         let panel_header = panel.clone();
+        let panel_select_all_label = panel.clone();
         let file_count = rows.len();
         let kind_filter_button = panel.clone();
         let staged_filter_button = panel.clone();
@@ -1265,9 +1266,26 @@ impl Render for ChangesPanel {
                             }),
                     )
                     .child(
+                        div()
+                            .id("changes-select-all-label")
+                            .cursor_pointer()
+                            .when(!has_selectable_rows, |el| el.opacity(0.5))
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                panel_select_all_label
+                                    .update(cx, |this, cx| this.toggle_all_visible(cx))
+                                    .ok();
+                            })
+                            .child(
+                                Label::new(t!("changes.select_all"))
+                                    .size(LabelSize::Small)
+                                    .color(Color::Default),
+                            ),
+                    )
+                    .child(
                         Label::new(tp!("changes.header", file_count))
                             .size(LabelSize::Small)
-                            .color(Color::Default),
+                            .color(Color::Muted),
                     )
                     .child(div().flex_1())
                     .child(
