@@ -1331,4 +1331,5 @@ impl Workspace {
                 }).ok();
             }
         }).detach();
-    }}
+    }
+}
