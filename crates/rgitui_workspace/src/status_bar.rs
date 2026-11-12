@@ -1,8 +1,9 @@
 use gpui::prelude::*;
-use gpui::{div, px, App, SharedString, Window};
+use gpui::{div, px, App, ClickEvent, SharedString, Window};
+use std::rc::Rc;
 use rgitui_i18n::t;
 use rgitui_theme::{ActiveTheme, Color, StyledExt};
-use rgitui_ui::{Icon, IconName, IconSize, Label, LabelSize};
+use rgitui_ui::{Button, ButtonSize, ButtonStyle, Icon, IconName, IconSize, Label, LabelSize, Tooltip};
 
 /// The bottom status bar.
 #[derive(IntoElement)]
@@ -14,6 +15,8 @@ pub struct StatusBar {
     unstaged_count: usize,
     stash_count: usize,
     operation_message: Option<String>,
+    operation_details: Option<String>,
+    on_retry: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
     is_loading: bool,
     is_error: bool,
     head_detached: bool,
@@ -37,6 +40,8 @@ impl StatusBar {
             unstaged_count: 0,
             stash_count: 0,
             operation_message: None,
+            operation_details: None,
+            on_retry: None,
             is_loading: false,
             is_error: false,
             head_detached: false,
@@ -74,6 +79,19 @@ impl StatusBar {
 
     pub fn operation_message(mut self, msg: impl Into<String>) -> Self {
         self.operation_message = Some(msg.into());
+        self
+    }
+
+    pub fn operation_details(mut self, details: impl Into<String>) -> Self {
+        self.operation_details = Some(details.into());
+        self
+    }
+
+    pub fn on_retry(
+        mut self,
+        callback: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_retry = Some(Rc::new(callback));
         self
     }
 
@@ -225,7 +243,19 @@ impl StatusBar {
                     .truncate(),
             );
 
+            if let Some(details) = &self.operation_details {
+                msg_row = msg_row.tooltip(Tooltip::text(details.clone()));
+            }
             left = left.child(msg_row);
+            if let Some(retry) = &self.on_retry {
+                let retry = Rc::clone(retry);
+                left = left.child(
+                    Button::new("status-operation-retry", t!("common.retry"))
+                        .size(ButtonSize::Compact)
+                        .style(ButtonStyle::Subtle)
+                        .on_click(move |event, window, cx| retry(event, window, cx)),
+                );
+            }
         }
 
         if self.stash_count > 0 {
