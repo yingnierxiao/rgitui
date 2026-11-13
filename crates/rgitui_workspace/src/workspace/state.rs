@@ -4,7 +4,7 @@ use rgitui_git::GitOperationUpdate;
 use crate::{
     BranchDialog, CommandPalette, CommitPanel, ConfirmDialog, CreatePrDialog, InteractiveRebase,
     RenameDialog, RepoCloneDialog, RepoOpener, ShortcutsHelp, StashBranchDialog, StashSaveDialog,
-    TagDialog, ThemeEditorDialog, WorktreeDialog,
+    TagDialog, ThemeEditorDialog, WorktreeDialog, RemoteDialog,
 };
 
 use super::focus::{DrawnPanels, OverlayFocus};
@@ -28,6 +28,8 @@ pub(crate) struct LayoutState {
 
 /// Modal dialog entities.
 pub(crate) struct DialogState {
+    pub add_submodule_dialog: Entity<crate::AddSubmoduleDialog>,
+    pub remote_dialog: Entity<RemoteDialog>,
     pub branch_dialog: Entity<BranchDialog>,
     pub tag_dialog: Entity<TagDialog>,
     pub rename_dialog: Entity<RenameDialog>,

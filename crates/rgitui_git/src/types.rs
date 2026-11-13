@@ -231,6 +231,7 @@ pub struct RemoteInfo {
     pub name: String,
     pub url: Option<String>,
     pub push_url: Option<String>,
+    pub is_default: bool,
 }
 
 /// Information about a worktree attached to this repository.

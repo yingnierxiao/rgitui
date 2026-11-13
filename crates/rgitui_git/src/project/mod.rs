@@ -136,7 +136,7 @@ fn english_messages_env(
 pub use bisect::{compute_bisect_log, is_bisect_in_progress, BisectDecision, BisectLogEntry};
 pub use blame::{compute_blame, BlameEntry, BlameLine};
 pub use diff::{
-    compute_commit_diff, compute_file_diff, compute_staged_diff_text, compute_stash_diff,
+    compute_commit_diff, compute_compare_diff, compute_file_diff, compute_staged_diff_text, compute_stash_diff,
     compute_three_way_conflict_diff,
 };
 pub use file_history::{compute_file_history, compute_file_history_at};
@@ -289,12 +289,41 @@ fn push_target(
         }
     }
 
+    if preferred_remote.is_none() {
+        if let Ok(remote_name) = repo.config()?.get_string("remote.pushDefault") {
+            validate_remote_name(&remote_name)?;
+            repo.find_remote(&remote_name)?;
+            return Ok((remote_name, branch_name, true));
+        }
+    }
+
     let remote_name = preferred_remote
         .map(str::to_string)
         .unwrap_or(default_remote_name(repo)?);
     validate_remote_name(&remote_name)?;
     validate_branch_name(&branch_name)?;
     Ok((remote_name, branch_name, true))
+}
+
+fn remote_tracking_branch_parts(repo: &Repository, name: &str) -> Result<(String, String)> {
+    let mut remotes = repo
+        .remotes()?
+        .iter()
+        .flatten()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    remotes.sort_by_key(|remote| std::cmp::Reverse(remote.len()));
+    for remote in remotes {
+        if let Some(branch) = name
+            .strip_prefix(&remote)
+            .and_then(|suffix| suffix.strip_prefix('/'))
+        {
+            validate_remote_name(&remote)?;
+            validate_branch_name(branch)?;
+            return Ok((remote, branch.to_string()));
+        }
+    }
+    anyhow::bail!("Remote branch '{}' does not match a configured remote", name)
 }
 
 /// All the data gathered during a refresh, designed to be Send so it can
@@ -327,6 +356,23 @@ pub struct RefreshData {
     pub status_cache_updated: bool,
     /// Status event epoch observed when this snapshot started gathering.
     pub status_refresh_epoch: Option<u64>,
+}
+
+#[cfg(test)]
+mod refresh_snapshot_tests {
+    use super::is_refresh_snapshot_current;
+
+    #[test]
+    fn older_status_snapshot_cannot_replace_a_newer_operation_result() {
+        assert!(is_refresh_snapshot_current(Some(8), 8));
+        assert!(is_refresh_snapshot_current(Some(9), 8));
+        assert!(!is_refresh_snapshot_current(Some(7), 8));
+        assert!(is_refresh_snapshot_current(None, 8));
+    }
+}
+
+fn is_refresh_snapshot_current(snapshot_epoch: Option<u64>, current_epoch: u64) -> bool {
+    snapshot_epoch.is_none_or(|epoch| epoch >= current_epoch)
 }
 
 /// Events emitted by GitProject.
@@ -518,7 +564,11 @@ impl GitProject {
             project.default_branch = cached.default_branch;
             // Reuse the validated on-disk history during the first live
             // refresh instead of immediately running the same git log again.
-            let initial_batch = project.recent_commits.len().max(100).min(project.commit_limit);
+            let initial_batch = project
+                .recent_commits
+                .len()
+                .max(100)
+                .min(project.commit_limit);
             project.refresh_caches.seed_hydrated_history(
                 &repo,
                 initial_batch,
@@ -793,6 +843,17 @@ impl GitProject {
         default_remote_name(&repo)
     }
 
+    /// Resolve a displayed remote-tracking branch against configured remotes.
+    pub fn remote_branch_parts_at(
+        &self,
+        worktree_path: &Path,
+        name: &str,
+    ) -> Result<(String, String)> {
+        let repo = Repository::open(worktree_path)
+            .with_context(|| format!("Failed to open repository at {}", worktree_path.display()))?;
+        remote_tracking_branch_parts(&repo, name)
+    }
+
     /// Resolve a tag name to the commit OID it points to.
     /// Handles both lightweight and annotated tags by peeling to the commit.
     pub fn resolve_tag_to_oid(&self, tag_name: &str) -> Result<git2::Oid> {
@@ -909,6 +970,15 @@ impl GitProject {
     }
 
     pub(crate) fn apply_refresh_data(&mut self, data: RefreshData) {
+        let current_status_epoch = self.refresh_caches.status_refresh_epoch();
+        if !is_refresh_snapshot_current(data.status_refresh_epoch, current_status_epoch) {
+            log::debug!(
+                "discarding stale refresh snapshot: snapshot_epoch={:?} current_epoch={}",
+                data.status_refresh_epoch,
+                current_status_epoch
+            );
+            return;
+        }
         if !Arc::ptr_eq(&self.recent_commits, &data.recent_commits) {
             self.commit_history_generation = self.commit_history_generation.wrapping_add(1);
             self.load_more_in_flight = false;
@@ -1056,9 +1126,7 @@ impl GitProject {
                         || this.commit_history_generation != history_generation
                     {
                         this.load_more_in_flight = false;
-                        log::info!(
-                            "load more discarded: a newer history snapshot was applied"
-                        );
+                        log::info!("load more discarded: a newer history snapshot was applied");
                         return Ok(());
                     }
                     this.load_more_in_flight = false;

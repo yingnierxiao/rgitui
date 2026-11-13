@@ -1344,6 +1344,10 @@ fn gather_refresh_data_internal(
     // Remotes
     let mut remotes = Vec::new();
     {
+        let default_remote = repo
+            .config()
+            .ok()
+            .and_then(|config| config.get_string("remote.pushDefault").ok());
         let remote_names = repo.remotes()?;
         for name in remote_names.iter().flatten() {
             if let Ok(remote) = repo.find_remote(name) {
@@ -1351,6 +1355,7 @@ fn gather_refresh_data_internal(
                     name: name.to_string(),
                     url: remote.url().map(String::from),
                     push_url: remote.pushurl().map(String::from),
+                    is_default: default_remote.as_deref() == Some(name),
                 });
             }
         }

@@ -260,6 +260,17 @@ impl Workspace {
             inspecting_worktree: None,
         });
         self.active_tab = self.tabs.len() - 1;
+        let project = self.tabs[self.active_tab].project.clone();
+        let sidebar = self.tabs[self.active_tab].sidebar.clone();
+        let submodule_task = project.update(cx, |project, cx| project.submodules_async(cx));
+        cx.spawn(async move |_, cx: &mut gpui::AsyncApp| {
+            if let Ok(submodules) = submodule_task.await {
+                cx.update(|cx| {
+                    sidebar.update(cx, |sidebar, cx| sidebar.update_submodules(submodules, cx));
+                });
+            }
+        })
+        .detach();
         log::info!("open_repo: opened as tab {}", self.tabs.len() - 1);
         self.update_command_context(cx);
         self.persist_workspace_snapshot(cx);

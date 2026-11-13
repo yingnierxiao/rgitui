@@ -6,9 +6,8 @@ use std::sync::Arc;
 use gpui::prelude::*;
 use gpui::{
     canvas, div, px, uniform_list, App, Bounds, ClickEvent, Context, ElementId, Entity,
-    FocusHandle, KeyDownEvent, ListSizingBehavior, MouseButton, MouseDownEvent, Pixels,
-    Point, Render, ScrollStrategy, SharedString, Size, UniformListScrollHandle, WeakEntity,
-    Window,
+    FocusHandle, KeyDownEvent, ListSizingBehavior, MouseButton, MouseDownEvent, Pixels, Point,
+    Render, ScrollStrategy, SharedString, Size, UniformListScrollHandle, WeakEntity, Window,
 };
 use rgitui_git::{CommitFileContents, CommitSelectedFile, FileChangeKind, FileStatus};
 use rgitui_i18n::{key, t, tp};
@@ -28,7 +27,6 @@ pub enum ChangesPanelEvent {
 }
 
 impl gpui::EventEmitter<ChangesPanelEvent> for ChangesPanel {}
-
 
 /// One row per path, even when both the index and working tree have changes.
 /// A partially staged file is represented by an indeterminate checkbox.
@@ -133,9 +131,9 @@ fn combine_changes(staged: Vec<FileStatus>, unstaged: Vec<FileStatus>) -> Vec<Ch
 
 fn change_color(kind: FileChangeKind) -> Color {
     match kind {
-        FileChangeKind::Added
-        | FileChangeKind::Untracked
-        | FileChangeKind::UntrackedDirectory => Color::Added,
+        FileChangeKind::Added | FileChangeKind::Untracked | FileChangeKind::UntrackedDirectory => {
+            Color::Added
+        }
         FileChangeKind::Deleted => Color::Deleted,
         FileChangeKind::Conflicted => Color::Conflict,
         FileChangeKind::Modified => Color::Modified,
@@ -208,7 +206,10 @@ impl ChangeContextMenuActions {
         Self {
             conflict,
             inspect: !conflict
-                && !matches!(row.kind(), FileChangeKind::Untracked | FileChangeKind::UntrackedDirectory),
+                && !matches!(
+                    row.kind(),
+                    FileChangeKind::Untracked | FileChangeKind::UntrackedDirectory
+                ),
             staged_diff: !conflict && row.staged_preview_event().is_some(),
             stage: !conflict && row.unstaged.is_some(),
             unstage: !conflict && row.staged.is_some(),
@@ -238,8 +239,7 @@ fn change_matches_filter(
 ) -> bool {
     (!only_staged || row.staged.is_some())
         && kind.matches(row.kind())
-        && (needle.is_empty()
-            || row.path.to_string_lossy().to_lowercase().contains(needle))
+        && (needle.is_empty() || row.path.to_string_lossy().to_lowercase().contains(needle))
 }
 
 /// A checkbox is a virtual include-in-commit selection. It never writes the
@@ -250,6 +250,18 @@ fn visual_state(row: &ChangeRow, overrides: &HashMap<PathBuf, CheckState>) -> Ch
         .get(&row.path)
         .copied()
         .unwrap_or_else(|| row.state())
+}
+
+fn prune_overrides_to_rows(
+    rows: &[ChangeRow],
+    overrides: &mut HashMap<PathBuf, CheckState>,
+) -> bool {
+    let before = overrides.len();
+    overrides.retain(|path, _| {
+        rows.binary_search_by(|row| row.path.as_path().cmp(path.as_path()))
+            .is_ok()
+    });
+    overrides.len() != before
 }
 
 fn visual_header_state(
@@ -542,10 +554,7 @@ impl ChangesPanel {
             scroll: UniformListScrollHandle::new(),
             focus_handle: cx.focus_handle(),
             context_menu: None,
-            container_bounds: Bounds::new(
-                Point::new(px(0.), px(0.)),
-                Size::new(px(0.), px(0.)),
-            ),
+            container_bounds: Bounds::new(Point::new(px(0.), px(0.)), Size::new(px(0.), px(0.))),
         }
     }
 
@@ -574,11 +583,25 @@ impl ChangesPanel {
         cx: &mut Context<Self>,
     ) {
         let updated = combine_changes(staged, unstaged);
+        let has_stale_overrides = self.overrides.keys().any(|path| {
+            updated
+                .binary_search_by(|row| row.path.as_path().cmp(path.as_path()))
+                .is_err()
+        });
+        let overrides_pruned = has_stale_overrides
+            && prune_overrides_to_rows(&updated, Arc::make_mut(&mut self.overrides));
         // A repository watcher may deliver an older or intermediate status
-        // snapshot while the user is clicking. Never discard virtual choices
-        // based on that snapshot: absent paths are ignored by commit_selection
-        // and choices are removed explicitly after a successful commit.
+        // snapshot while the user is clicking. Refresh epochs reject older
+        // snapshots before they reach this panel; a path absent from the
+        // current snapshot has therefore been removed and its virtual choice
+        // must not resurrect if the file is edited again later.
         if self.rows.as_ref() == &updated {
+            if overrides_pruned {
+                self.update_counts(&updated);
+                self.rebuild_filter();
+                cx.emit(ChangesPanelEvent::SelectionChanged(self.staged_count));
+                cx.notify();
+            }
             return;
         }
         if self
@@ -618,9 +641,11 @@ impl ChangesPanel {
         if self.worktree_path.as_deref() != Some(worktree) {
             return;
         }
-        let Some(index) = self.rows.iter().position(|row| {
-            row.path == path && row.kind() == FileChangeKind::UntrackedDirectory
-        }) else {
+        let Some(index) = self
+            .rows
+            .iter()
+            .position(|row| row.path == path && row.kind() == FileChangeKind::UntrackedDirectory)
+        else {
             return;
         };
         let mut rows = self.rows.as_ref().clone();
@@ -653,8 +678,7 @@ impl ChangesPanel {
         self.staged_count = rows
             .iter()
             .filter(|row| {
-                !row.has_conflict()
-                    && visual_state(row, &self.overrides) != CheckState::Unchecked
+                !row.has_conflict() && visual_state(row, &self.overrides) != CheckState::Unchecked
             })
             .count();
     }
@@ -704,20 +728,15 @@ impl ChangesPanel {
                 .retain(|path| visible_paths.contains(path.as_path()));
         }
         self.visible = Arc::new(visible);
-        self.selected_row = self
-            .selected_path
-            .as_ref()
-            .and_then(|path| {
-                self.visible
-                    .iter()
-                    .position(|&index| self.rows[index].path == *path)
-            });
+        self.selected_row = self.selected_path.as_ref().and_then(|path| {
+            self.visible
+                .iter()
+                .position(|&index| self.rows[index].path == *path)
+        });
     }
 
     fn send(&self, event: SidebarEvent, cx: &mut App) {
-        self.sidebar
-            .update(cx, |_, cx| cx.emit(event))
-            .ok();
+        self.sidebar.update(cx, |_, cx| cx.emit(event)).ok();
     }
 
     /// Capture virtual choices for all changed paths. Filtering affects only
@@ -785,8 +804,7 @@ impl ChangesPanel {
             if self.only_staged {
                 self.rebuild_filter();
             } else {
-                self.header_state =
-                    visual_header_state(&self.rows, &self.visible, &self.overrides);
+                self.header_state = visual_header_state(&self.rows, &self.visible, &self.overrides);
             }
             cx.emit(ChangesPanelEvent::SelectionChanged(self.staged_count));
             cx.notify();
@@ -795,12 +813,7 @@ impl ChangesPanel {
 
     /// A commit consumes its selected paths; a failed commit keeps the user's
     /// virtual choices so they can correct the error without selecting again.
-    pub fn commit_succeeded(
-        &mut self,
-        worktree: &Path,
-        paths: &[PathBuf],
-        cx: &mut Context<Self>,
-    ) {
+    pub fn commit_succeeded(&mut self, worktree: &Path, paths: &[PathBuf], cx: &mut Context<Self>) {
         // A background commit may finish after the user inspects another
         // worktree. Never clear that new worktree's choices by accident.
         if self.worktree_path.as_deref() != Some(worktree) {
@@ -831,7 +844,8 @@ impl ChangesPanel {
         } else {
             CheckState::Checked
         };
-        let paths = self.visible
+        let paths = self
+            .visible
             .iter()
             .filter_map(|index| self.rows.get(*index))
             .filter(|row| !row.has_conflict())
@@ -950,7 +964,6 @@ impl ChangesPanel {
         }
         self.selected_paths = Arc::new(selected);
         cx.notify();
-
     }
 
     fn select_all_visible(&mut self, cx: &mut Context<Self>) {
@@ -1016,7 +1029,10 @@ impl Render for ChangesPanel {
         let selected_paths = self.selected_paths.clone();
         let sidebar = self.sidebar.clone();
         let panel = cx.weak_entity();
-        let show_line_stats = cx.global::<SettingsState>().settings().show_change_line_stats;
+        let show_line_stats = cx
+            .global::<SettingsState>()
+            .settings()
+            .show_change_line_stats;
         let staged_count = self.staged_count;
         let header_state = self.header_state;
         let has_selectable_rows = self.header_enabled && !self.commit_in_progress;
@@ -1083,7 +1099,10 @@ impl Render for ChangesPanel {
                         let accent = row_colors.text_accent;
 
                         div()
-                            .id(ElementId::NamedInteger("changes-file-row".into(), row_number as u64))
+                            .id(ElementId::NamedInteger(
+                                "changes-file-row".into(),
+                                row_number as u64,
+                            ))
                             .h_flex()
                             .w_full()
                             .h(px(28.))
@@ -1092,9 +1111,7 @@ impl Render for ChangesPanel {
                             .items_center()
                             .border_l_2()
                             .border_color(row_colors.border_transparent)
-                            .when(is_selected, |el| {
-                                el.bg(row_bg).border_color(accent)
-                            })
+                            .when(is_selected, |el| el.bg(row_bg).border_color(accent))
                             .hover(move |el| el.bg(row_hover))
                             .cursor_pointer()
                             .on_mouse_down(
@@ -1128,26 +1145,28 @@ impl Render for ChangesPanel {
                                         .ok();
                                 },
                             )
-                            .on_click(move |event: &ClickEvent, window: &mut Window, cx: &mut App| {
-                                let modifiers = event.modifiers();
-                                weak_panel
-                                    .update(cx, |this, cx| {
-                                        this.select_visible_path(
-                                            &row_click_path,
-                                            row_number,
-                                            modifiers.shift,
-                                            modifiers.secondary(),
-                                            cx,
-                                        );
-                                        this.focus_handle.focus(window, cx);
-                                    })
-                                    .ok();
-                                if !modifiers.shift && !modifiers.secondary() {
-                                    sidebar_select
-                                        .update(cx, |_, cx| cx.emit(select_action.clone()))
+                            .on_click(
+                                move |event: &ClickEvent, window: &mut Window, cx: &mut App| {
+                                    let modifiers = event.modifiers();
+                                    weak_panel
+                                        .update(cx, |this, cx| {
+                                            this.select_visible_path(
+                                                &row_click_path,
+                                                row_number,
+                                                modifiers.shift,
+                                                modifiers.secondary(),
+                                                cx,
+                                            );
+                                            this.focus_handle.focus(window, cx);
+                                        })
                                         .ok();
-                                }
-                            })
+                                    if !modifiers.shift && !modifiers.secondary() {
+                                        sidebar_select
+                                            .update(cx, |_, cx| cx.emit(select_action.clone()))
+                                            .ok();
+                                    }
+                                },
+                            )
                             .child(
                                 Checkbox::new(
                                     ElementId::NamedInteger(
@@ -1219,12 +1238,14 @@ impl Render for ChangesPanel {
                                         t!("changes.preview_staged"),
                                     )
                                     .size(ButtonSize::Compact)
-                                    .on_click(move |_, _, cx| {
-                                        cx.stop_propagation();
-                                        sidebar_preview
-                                            .update(cx, |_, cx| cx.emit(preview.clone()))
-                                            .ok();
-                                    }),
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            cx.stop_propagation();
+                                            sidebar_preview
+                                                .update(cx, |_, cx| cx.emit(preview.clone()))
+                                                .ok();
+                                        },
+                                    ),
                                 )
                             })
                             .when(show_line_stats && !disabled, |el| {
@@ -1297,7 +1318,7 @@ impl Render for ChangesPanel {
                         } else {
                             this.clear_selection(cx);
                         }
-                    },
+                    }
                     _ => cx.propagate(),
                 }
             }))
@@ -1419,31 +1440,31 @@ impl Render for ChangesPanel {
                     .w_full()
                     .when(file_count == 0, |el| {
                         el.child(
-                            div()
-                                .p(px(12.))
-                                .child(
-                                    Label::new(t!("sidebar.working_clean"))
-                                        .color(Color::Muted)
-                                        .size(LabelSize::Small),
-                                ),
+                            div().p(px(12.)).child(
+                                Label::new(t!("sidebar.working_clean"))
+                                    .color(Color::Muted)
+                                    .size(LabelSize::Small),
+                            ),
                         )
                     })
                     .when(file_count > 0 && self.visible.is_empty(), |el| {
                         el.child(
-                            div()
-                                .p(px(12.))
-                                .child(
-                                    Label::new(t!("changes.no_matches"))
-                                        .color(Color::Muted)
-                                        .size(LabelSize::Small),
-                                ),
+                            div().p(px(12.)).child(
+                                Label::new(t!("changes.no_matches"))
+                                    .color(Color::Muted)
+                                    .size(LabelSize::Small),
+                            ),
                         )
                     })
                     .when(!self.visible.is_empty(), |el| el.child(list)),
             );
 
         if let Some(menu_state) = self.context_menu.clone() {
-            let row = self.rows.iter().find(|row| row.path == menu_state.path).cloned();
+            let row = self
+                .rows
+                .iter()
+                .find(|row| row.path == menu_state.path)
+                .cloned();
             let actions = row.as_ref().map(|row| {
                 let mut actions = ChangeContextMenuActions::for_row(row);
                 if actions.discard
@@ -1461,10 +1482,7 @@ impl Render for ChangesPanel {
                 actions
             });
             let menu_height = actions.map_or(0.0, ChangeContextMenuActions::height);
-            let menu_size = Size::new(
-                px(CHANGE_CONTEXT_MENU_WIDTH),
-                px(menu_height),
-            );
+            let menu_size = Size::new(px(CHANGE_CONTEXT_MENU_WIDTH), px(menu_height));
             let bounds = self.container_bounds;
             let relative_x = menu_state.position.x - bounds.origin.x;
             let relative_y = menu_state.position.y - bounds.origin.y;
@@ -1503,21 +1521,17 @@ impl Render for ChangesPanel {
                     let open_event = row.selected_event();
                     let sidebar = weak_sidebar.clone();
                     let panel = weak_panel.clone();
-                    menu = menu.item(
-                        ContextMenuItem::new(t!("changes.menu.open_diff")).on_click(
-                            move |_, _, cx| {
-                                panel
-                                    .update(cx, |this, cx| {
-                                        this.context_menu = None;
-                                        cx.notify();
-                                    })
-                                    .ok();
-                                sidebar
-                                    .update(cx, |_, cx| cx.emit(open_event.clone()))
-                                    .ok();
-                            },
-                        ),
-                    );
+                    menu = menu.item(ContextMenuItem::new(t!("changes.menu.open_diff")).on_click(
+                        move |_, _, cx| {
+                            panel
+                                .update(cx, |this, cx| {
+                                    this.context_menu = None;
+                                    cx.notify();
+                                })
+                                .ok();
+                            sidebar.update(cx, |_, cx| cx.emit(open_event.clone())).ok();
+                        },
+                    ));
 
                     // History and blame use the same Workspace commands as
                     // the bottom tabs. They are computed only when opened.
@@ -1529,17 +1543,21 @@ impl Render for ChangesPanel {
                         menu = menu.item(
                             ContextMenuItem::new(t!("workspace.bottom.history")).on_click(
                                 move |_, _, cx| {
-                                    panel_entity.update(cx, |this, cx| {
-                                        this.context_menu = None;
-                                        cx.notify();
-                                    }).ok();
-                                    sidebar.update(cx, |_, cx| {
-                                        cx.emit(SidebarEvent::FileInspectionRequested {
-                                            path: path.clone(),
-                                            staged,
-                                            blame: false,
-                                        });
-                                    }).ok();
+                                    panel_entity
+                                        .update(cx, |this, cx| {
+                                            this.context_menu = None;
+                                            cx.notify();
+                                        })
+                                        .ok();
+                                    sidebar
+                                        .update(cx, |_, cx| {
+                                            cx.emit(SidebarEvent::FileInspectionRequested {
+                                                path: path.clone(),
+                                                staged,
+                                                blame: false,
+                                            });
+                                        })
+                                        .ok();
                                 },
                             ),
                         );
@@ -1547,23 +1565,25 @@ impl Render for ChangesPanel {
                         let sidebar = weak_sidebar.clone();
                         let panel_entity = weak_panel.clone();
                         let path = row.path.to_string_lossy().to_string();
-                        menu = menu.item(
-                            ContextMenuItem::new(t!("common.blame")).on_click(
-                                move |_, _, cx| {
-                                    panel_entity.update(cx, |this, cx| {
+                        menu = menu.item(ContextMenuItem::new(t!("common.blame")).on_click(
+                            move |_, _, cx| {
+                                panel_entity
+                                    .update(cx, |this, cx| {
                                         this.context_menu = None;
                                         cx.notify();
-                                    }).ok();
-                                    sidebar.update(cx, |_, cx| {
+                                    })
+                                    .ok();
+                                sidebar
+                                    .update(cx, |_, cx| {
                                         cx.emit(SidebarEvent::FileInspectionRequested {
                                             path: path.clone(),
                                             staged,
                                             blame: true,
                                         });
-                                    }).ok();
-                                },
-                            ),
-                        );
+                                    })
+                                    .ok();
+                            },
+                        ));
                     }
 
                     let staged_event = if actions.staged_diff {
@@ -1618,8 +1638,8 @@ impl Render for ChangesPanel {
                         let sidebar = weak_sidebar.clone();
                         let panel = weak_panel.clone();
                         let path = row.path.to_string_lossy().to_string();
-                        menu = menu.item(
-                            ContextMenuItem::new(t!("changes.menu.unstage")).on_click(
+                        menu =
+                            menu.item(ContextMenuItem::new(t!("changes.menu.unstage")).on_click(
                                 move |_, _, cx| {
                                     panel
                                         .update(cx, |this, cx| {
@@ -1633,8 +1653,7 @@ impl Render for ChangesPanel {
                                         })
                                         .ok();
                                 },
-                            ),
-                        );
+                            ));
                     }
 
                     // The existing DiscardFile operation restores to HEAD and
@@ -1660,13 +1679,17 @@ impl Render for ChangesPanel {
                                 .map(|path| path.to_string_lossy().to_string())
                                 .collect::<Vec<_>>();
                             let label = if paths.len() > 1 {
-                                format!("{} ({} files)", t!("changes.menu.discard").to_string(), paths.len())
-                                    .into()
+                                format!(
+                                    "{} ({} files)",
+                                    t!("changes.menu.discard").to_string(),
+                                    paths.len()
+                                )
+                                .into()
                             } else {
                                 t!("changes.menu.discard")
                             };
-                            menu = menu.separator().item(
-                                ContextMenuItem::new(label).on_click(move |_, _, cx| {
+                            menu = menu.separator().item(ContextMenuItem::new(label).on_click(
+                                move |_, _, cx| {
                                     panel
                                         .update(cx, |this, cx| {
                                             this.context_menu = None;
@@ -1678,8 +1701,8 @@ impl Render for ChangesPanel {
                                             cx.emit(SidebarEvent::DiscardFiles(paths.clone()));
                                         })
                                         .ok();
-                                }),
-                            );
+                                },
+                            ));
                         }
                     }
                 }
@@ -1687,19 +1710,15 @@ impl Render for ChangesPanel {
                 let copy_path = menu_state.path.to_string_lossy().to_string();
                 let panel_entity = weak_panel.clone();
                 menu = menu.separator().item(
-                    ContextMenuItem::new(t!("changes.menu.copy_path")).on_click(
-                        move |_, _, cx| {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                copy_path.clone(),
-                            ));
-                            panel_entity
-                                .update(cx, |this, cx| {
-                                    this.context_menu = None;
-                                    cx.notify();
-                                })
-                                .ok();
-                        },
-                    ),
+                    ContextMenuItem::new(t!("changes.menu.copy_path")).on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_path.clone()));
+                        panel_entity
+                            .update(cx, |this, cx| {
+                                this.context_menu = None;
+                                cx.notify();
+                            })
+                            .ok();
+                    }),
                 );
 
                 let menu_overlay = div()
@@ -1882,13 +1901,25 @@ mod tests {
         assert_eq!(visual_state(&unstaged[0], &overrides), CheckState::Checked);
         let staged = combine_changes(vec![file("a.rs", FileChangeKind::Modified)], vec![]);
         assert_eq!(visual_state(&staged[0], &overrides), CheckState::Checked);
-        let unchecked =
-            HashMap::from([(PathBuf::from("a.rs"), CheckState::Unchecked)]);
+        let unchecked = HashMap::from([(PathBuf::from("a.rs"), CheckState::Unchecked)]);
         assert_eq!(visual_state(&staged[0], &unchecked), CheckState::Unchecked);
         assert_eq!(
             visual_header_state(&staged, &[0], &unchecked),
             CheckState::Unchecked
         );
+    }
+
+    #[test]
+    fn discarded_paths_do_not_keep_virtual_choices_for_future_edits() {
+        let rows = combine_changes(vec![], vec![file("b.rs", FileChangeKind::Modified)]);
+        let mut overrides = HashMap::from([
+            (PathBuf::from("a.rs"), CheckState::Checked),
+            (PathBuf::from("b.rs"), CheckState::Checked),
+        ]);
+
+        assert!(prune_overrides_to_rows(&rows, &mut overrides));
+        assert!(!overrides.contains_key(Path::new("a.rs")));
+        assert_eq!(overrides.get(Path::new("b.rs")), Some(&CheckState::Checked));
     }
 
     #[test]
@@ -1901,8 +1932,7 @@ mod tests {
             visual_state(&rows[0], &HashMap::new()),
             CheckState::Indeterminate
         );
-        let overrides =
-            HashMap::from([(PathBuf::from("partial.rs"), CheckState::Checked)]);
+        let overrides = HashMap::from([(PathBuf::from("partial.rs"), CheckState::Checked)]);
         assert_eq!(visual_state(&rows[0], &overrides), CheckState::Checked);
     }
 
@@ -1930,8 +1960,12 @@ mod tests {
         assert!(included.iter().any(|f| {
             f.path.as_path() == Path::new("old.rs") && f.contents == CommitFileContents::WorkingTree
         }));
-        assert!(included.iter().any(|f| f.path.as_path() == Path::new("partial.rs")));
-        assert!(!included.iter().any(|f| f.path.as_path() == Path::new("staged.rs")));
+        assert!(included
+            .iter()
+            .any(|f| f.path.as_path() == Path::new("partial.rs")));
+        assert!(!included
+            .iter()
+            .any(|f| f.path.as_path() == Path::new("staged.rs")));
         assert!(excluded.contains(&PathBuf::from("skipped.rs")));
         assert!(excluded.contains(&PathBuf::from("staged.rs")));
     }
@@ -2044,23 +2078,13 @@ mod tests {
         let selected = HashSet::from([PathBuf::from("a.rs"), PathBuf::from("b.rs")]);
         let overrides = HashMap::new();
         assert_eq!(
-            discard_target_paths(
-                &rows,
-                &visible,
-                &selected,
-                &overrides,
-                Path::new("a.rs"),
-            ),
+            discard_target_paths(&rows, &visible, &selected, &overrides, Path::new("a.rs"),),
             vec![PathBuf::from("a.rs"), PathBuf::from("b.rs")]
         );
-        assert!(discard_target_paths(
-            &rows,
-            &visible,
-            &selected,
-            &overrides,
-            Path::new("c.rs")
-        )
-        .is_empty());
+        assert!(
+            discard_target_paths(&rows, &visible, &selected, &overrides, Path::new("c.rs"))
+                .is_empty()
+        );
         let unsafe_selection = HashSet::from([PathBuf::from("a.rs"), PathBuf::from("c.rs")]);
         assert!(discard_target_paths(
             &rows,
@@ -2094,13 +2118,7 @@ mod tests {
         ]);
 
         assert_eq!(
-            discard_target_paths(
-                &rows,
-                &visible,
-                &selected,
-                &overrides,
-                Path::new("a.rs"),
-            ),
+            discard_target_paths(&rows, &visible, &selected, &overrides, Path::new("a.rs"),),
             vec![PathBuf::from("a.rs"), PathBuf::from("b.rs")]
         );
     }

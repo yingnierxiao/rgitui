@@ -16,21 +16,162 @@ use rgitui_graph::{GraphView, GraphViewEvent, WorktreeGraphInfo};
 use rgitui_i18n::{msg, Message};
 
 use crate::{
-    cache::LruCache, BisectView, BisectViewEvent, BlameView, BlameViewEvent, BranchDialog,
-    BranchDialogEvent, CommandPalette, CommandPaletteEvent, CommitPanel, CommitPanelEvent,
-    ConfirmAction, ConfirmDialog, ConfirmDialogEvent, CreatePrDialog, CreatePrDialogEvent,
-    DetailPanel, DetailPanelEvent, FileHistoryView, FileHistoryViewEvent, GlobalSearchView,
-    GlobalSearchViewEvent, InteractiveRebase, InteractiveRebaseEvent, ReflogView, ReflogViewEvent,
-    RenameDialog, RenameDialogEvent, RepoCloneDialog, RepoCloneEvent, RepoOpener, RepoOpenerEvent,
-    ShortcutsHelp, ShortcutsHelpEvent, Sidebar, SidebarEvent, StashBranchDialog,
-    StashBranchDialogEvent, StashSaveDialog, StashSaveDialogEvent, SubmoduleView,
-    SubmoduleViewEvent, TagDialog, TagDialogEvent, ToastKind, Toolbar, ToolbarEvent,
-    WorktreeDialog, WorktreeDialogEvent,
+    cache::LruCache, AddSubmoduleDialog, AddSubmoduleDialogEvent, BisectView, BisectViewEvent,
+    BlameView, BlameViewEvent, BranchDialog, BranchDialogEvent, CommandPalette,
+    CommandPaletteEvent, CommitPanel, CommitPanelEvent, ConfirmAction, ConfirmDialog,
+    ConfirmDialogEvent, CreatePrDialog, CreatePrDialogEvent, DetailPanel, DetailPanelEvent,
+    FileHistoryView, FileHistoryViewEvent, GlobalSearchView, GlobalSearchViewEvent,
+    InteractiveRebase, InteractiveRebaseEvent, ReflogView, ReflogViewEvent, RemoteDialog,
+    RemoteDialogEvent, RenameDialog, RenameDialogEvent, RepoCloneDialog, RepoCloneEvent,
+    RepoOpener, RepoOpenerEvent, ShortcutsHelp,
+    ShortcutsHelpEvent, Sidebar, SidebarEvent, StashBranchDialog, StashBranchDialogEvent,
+    StashSaveDialog, StashSaveDialogEvent, SubmoduleView, SubmoduleViewEvent, TagDialog,
+    TagDialogEvent, ToastKind, Toolbar, ToolbarEvent, WorktreeDialog, WorktreeDialogEvent,
 };
 
+pub(super) fn subscribe_add_submodule_dialog(
+    cx: &mut Context<Workspace>,
+    dialog: &Entity<AddSubmoduleDialog>,
+) {
+    cx.subscribe(
+        dialog,
+        |this, dialog, event: &AddSubmoduleDialogEvent, cx| {
+            let Some(tab) = this.tabs.get(this.active_tab) else {
+                return;
+            };
+            let project = tab.project.clone();
+            let view = tab.submodule_view.clone();
+            let sidebar = tab.sidebar.clone();
+            let dialog = dialog.clone();
+            let task = match event {
+                AddSubmoduleDialogEvent::Add {
+                    url,
+                    path,
+                    branch,
+                    recursive,
+                } => {
+                    let path = std::path::PathBuf::from(path);
+                    project.update(cx, |project, cx| {
+                        project.submodule_add_async(
+                            url.clone(),
+                            path,
+                            branch.clone(),
+                            *recursive,
+                            cx,
+                        )
+                    })
+                }
+                AddSubmoduleDialogEvent::ChangeUrl { name, path, url } => {
+                    project.update(cx, |project, cx| {
+                        project.submodule_set_url_async(
+                            name.clone(),
+                            std::path::PathBuf::from(path),
+                            url.clone(),
+                            cx,
+                        )
+                    })
+                }
+                AddSubmoduleDialogEvent::Dismissed => return,
+            };
+            cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
+                let result = task.await.map_err(|error| error.to_string());
+                cx.update(|cx| {
+                    let _ = dialog.update(cx, |dialog, cx| dialog.on_finished(result.clone(), cx));
+                    let _ = this.update(cx, |workspace, cx| match result {
+                        Ok(()) => {
+                            workspace.show_toast(
+                                "子模块操作完成".to_string(),
+                                ToastKind::Success,
+                                cx,
+                            );
+                            if let Some(tab) = workspace.tabs.get(workspace.active_tab) {
+                                let project = tab.project.clone();
+                                let view = view.clone();
+                                let sidebar = sidebar.clone();
+                                let task =
+                                    project.update(cx, |project, cx| project.submodules_async(cx));
+                                cx.spawn(async move |_, cx: &mut gpui::AsyncApp| {
+                                    if let Ok(submodules) = task.await {
+                                        cx.update(|cx| {
+                                            view.update(cx, |view, cx| {
+                                                view.set_submodules(submodules.clone(), cx)
+                                            });
+                                            sidebar.update(cx, |sidebar, cx| {
+                                                sidebar.update_submodules(submodules, cx)
+                                            });
+                                        });
+                                    }
+                                })
+                                .detach();
+                            }
+                            if let Some(tab) = workspace.tabs.get(workspace.active_tab) {
+                                tab.project
+                                    .update(cx, |project, cx| project.refresh(cx).detach());
+                            }
+                        }
+                        Err(error) => workspace.show_toast(error, ToastKind::Error, cx),
+                    });
+                });
+            })
+            .detach();
+        },
+    )
+    .detach();
+}
+
+pub(super) fn subscribe_remote_dialog(
+    cx: &mut Context<Workspace>,
+    dialog: &Entity<RemoteDialog>,
+) {
+    cx.subscribe(
+        dialog,
+        |this, dialog, event: &RemoteDialogEvent, cx| {
+            let Some(tab) = this.tabs.get(this.active_tab) else {
+                return;
+            };
+            let project = tab.project.clone();
+            let dialog = dialog.clone();
+            let task = match event {
+                RemoteDialogEvent::Add {
+                    name,
+                    url,
+                    is_default,
+                } => project.update(cx, |project, cx| {
+                    project.add_remote(name, url, *is_default, cx)
+                }),
+                RemoteDialogEvent::Edit {
+                    old_name,
+                    name,
+                    url,
+                    is_default,
+                } => project.update(cx, |project, cx| {
+                    project.update_remote(old_name, name, url, *is_default, cx)
+                }),
+                RemoteDialogEvent::Dismissed => return,
+            };
+            cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
+                let result = task.await.map_err(|error| error.to_string());
+                cx.update(|cx| {
+                    let _ = dialog.update(cx, |dialog, cx| dialog.on_finished(result.clone(), cx));
+                    let _ = this.update(cx, |workspace, cx| match result {
+                        Ok(()) => workspace.show_toast(
+                            "远程仓库已更新".to_string(),
+                            ToastKind::Success,
+                            cx,
+                        ),
+                        Err(error) => workspace.show_toast(error, ToastKind::Error, cx),
+                    });
+                });
+            })
+            .detach();
+        },
+    )
+    .detach();
+}
+
 use super::{
-    ActiveOperation, AiGenerationTarget, BottomPanelMode, OperationOutput, UndoAction,
-    ViewCaches, Workspace,
+    ActiveOperation, AiGenerationTarget, BottomPanelMode, OperationOutput, UndoAction, ViewCaches,
+    Workspace,
 };
 
 pub(super) fn build_worktree_graph_infos(
@@ -670,7 +811,10 @@ pub(super) fn subscribe_confirm_dialog(
                         }
                         ConfirmAction::DiscardFiles(paths) => {
                             if !paths.is_empty() {
-                                let paths = paths.iter().map(std::path::PathBuf::from).collect::<Vec<_>>();
+                                let paths = paths
+                                    .iter()
+                                    .map(std::path::PathBuf::from)
+                                    .collect::<Vec<_>>();
                                 let worktree_path = this.effective_worktree_path(cx);
                                 project.update(cx, |proj, cx| {
                                     proj.discard_changes_at(&paths, &worktree_path, cx).detach();
@@ -839,6 +983,13 @@ pub(super) fn subscribe_confirm_dialog(
                                 proj.remove_remote(&name, cx).detach();
                             });
                         }
+                        ConfirmAction::RemoteBranchDelete(name) => {
+                            let name = name.clone();
+                            let worktree_path = this.effective_worktree_path(cx);
+                            project.update(cx, |proj, cx| {
+                                proj.delete_remote_branch(&name, &worktree_path, cx).detach();
+                            });
+                        }
                         ConfirmAction::AbortOperation(_) => {
                             let worktree_path = this.effective_worktree_path(cx);
                             project.update(cx, |proj, cx| {
@@ -859,6 +1010,51 @@ pub(super) fn subscribe_confirm_dialog(
                                 proj.remove_worktree(path, cx).detach();
                             });
                             update_sidebar_for_active_worktree(this, cx);
+                        }
+                        ConfirmAction::SubmoduleRemove { path, .. } => {
+                            let path = std::path::PathBuf::from(path.clone());
+                            let submodule_view = tab.submodule_view.clone();
+                            let sidebar = tab.sidebar.clone();
+                            let project = project.clone();
+                            let task = project.update(cx, |proj, cx| {
+                                proj.submodule_remove_async(path, cx)
+                            });
+                            cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
+                                let result = task.await;
+                                let submodules = if result.is_ok() {
+                                    let refresh = project
+                                        .update(cx, |project, cx| project.submodules_async(cx));
+                                    refresh.await.ok()
+                                } else {
+                                    None
+                                };
+                                cx.update(|cx| {
+                                    if let Some(submodules) = submodules {
+                                        submodule_view.update(cx, |view, cx| {
+                                            view.set_submodules(submodules.clone(), cx)
+                                        });
+                                        sidebar.update(cx, |sidebar, cx| {
+                                            sidebar.update_submodules(submodules, cx)
+                                        });
+                                        let _ = this.update(cx, |workspace, cx| {
+                                            workspace.show_toast(
+                                                "子模块已删除".to_string(),
+                                                ToastKind::Success,
+                                                cx,
+                                            );
+                                        });
+                                    } else if let Err(error) = result {
+                                        let _ = this.update(cx, |workspace, cx| {
+                                            workspace.show_toast(
+                                                error.to_string(),
+                                                ToastKind::Error,
+                                                cx,
+                                            );
+                                        });
+                                    }
+                                });
+                            })
+                            .detach();
                         }
                     }
                 }
@@ -1373,9 +1569,7 @@ pub(super) fn subscribe_project(cx: &mut Context<Workspace>, subs: ProjectSubscr
                     let priority_worktree = tab.effective_repo_path(cx);
                     let paths = tab.changes_panel.read(cx).priority_stats_paths(24);
                     project.update(cx, |proj, cx| {
-                        proj.schedule_deferred_line_stats(
-                            priority_worktree, paths, cx,
-                        );
+                        proj.schedule_deferred_line_stats(priority_worktree, paths, cx);
                     });
                 }
             }
@@ -1479,6 +1673,20 @@ pub(super) fn subscribe_project(cx: &mut Context<Workspace>, subs: ProjectSubscr
                     tb.set_fetching(is_running && update.kind == GitOperationKind::Fetch, cx);
                     tb.set_pulling(is_running && update.kind == GitOperationKind::Pull, cx);
                     tb.set_pushing(is_running && update.kind.is_push(), cx);
+                    if matches!(update.kind, GitOperationKind::Fetch | GitOperationKind::Pull)
+                        || update.kind.is_push()
+                    {
+                        let started_at = if is_running {
+                            this.operations
+                                .active_operations
+                                .iter()
+                                .find(|operation| operation.id == operation_id)
+                                .map(|operation| operation.started_at)
+                        } else {
+                            None
+                        };
+                        tb.set_network_operation(operation_id, is_running, started_at, cx);
+                    }
                 });
             }
         }
@@ -1503,7 +1711,59 @@ pub(super) fn subscribe_sidebar(
 
     cx.subscribe(&sidebar, {
         move |this, _sidebar, event: &SidebarEvent, cx| match event {
-            SidebarEvent::FileInspectionRequested { path, staged, blame } => {
+            SidebarEvent::AddSubmodule => {
+                this.dialogs
+                    .add_submodule_dialog
+                    .update(cx, |dialog, cx| dialog.show_visible(cx));
+            }
+            SidebarEvent::OpenSubmodule(path) => {
+                let path = std::path::PathBuf::from(path);
+                let path = if path.is_absolute() {
+                    path
+                } else {
+                    project.read(cx).repo_path().join(path)
+                };
+                match this.open_repo(path.clone(), cx) {
+                    Ok(()) => this.show_toast(
+                        format!("已打开子模块 {}", path.display()),
+                        ToastKind::Success,
+                        cx,
+                    ),
+                    Err(error) => {
+                        this.show_toast(format!("无法打开子模块: {error}"), ToastKind::Error, cx)
+                    }
+                }
+            }
+            SidebarEvent::RemoveSubmodule(path) => {
+                if let Some(tab) = this.tabs.iter().find(|tab| tab.sidebar == sidebar_ref) {
+                    let submodule = tab
+                        .sidebar
+                        .read(cx)
+                        .submodule_by_path(std::path::Path::new(path));
+                    let name = submodule
+                        .map(|submodule| submodule.name.clone())
+                        .unwrap_or_else(|| path.clone());
+                    this.dialogs.confirm_dialog.update(cx, |dialog, cx| {
+                        dialog.show_visible(
+                            ConfirmAction::SubmoduleRemove {
+                                name,
+                                path: path.clone(),
+                            },
+                            cx,
+                        );
+                    });
+                }
+            }
+            SidebarEvent::ChangeSubmoduleUrl { name, path, url } => {
+                this.dialogs.add_submodule_dialog.update(cx, |dialog, cx| {
+                    dialog.show_change_url(name.clone(), path.clone(), url.clone(), cx)
+                });
+            }
+            SidebarEvent::FileInspectionRequested {
+                path,
+                staged,
+                blame,
+            } => {
                 let mode = if *blame {
                     BottomPanelMode::Blame
                 } else {
@@ -1520,8 +1780,11 @@ pub(super) fn subscribe_sidebar(
                             // The right-click action is "open", not a toggle.
                             this.tabs[index].bottom_panel_mode = BottomPanelMode::Diff;
                             this.execute_command(
-                                if *blame { crate::CommandId::Blame }
-                                else { crate::CommandId::FileHistory },
+                                if *blame {
+                                    crate::CommandId::Blame
+                                } else {
+                                    crate::CommandId::FileHistory
+                                },
                                 cx,
                             );
                         }
@@ -1547,7 +1810,9 @@ pub(super) fn subscribe_sidebar(
                 if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.sidebar == sidebar_ref) {
                     // Ordinary file selection cancels any pending right-click
                     // navigation to a different path.
-                    if tab.pending_file_inspection.as_ref()
+                    if tab
+                        .pending_file_inspection
+                        .as_ref()
                         .is_some_and(|(target, _)| target != path)
                     {
                         tab.pending_file_inspection = None;
@@ -1706,7 +1971,10 @@ pub(super) fn subscribe_sidebar(
                 });
             }
             SidebarEvent::StageFiles(paths) => {
-                let paths = paths.iter().map(std::path::PathBuf::from).collect::<Vec<_>>();
+                let paths = paths
+                    .iter()
+                    .map(std::path::PathBuf::from)
+                    .collect::<Vec<_>>();
                 if !paths.is_empty() {
                     let worktree_path = this.effective_worktree_path(cx);
                     project.update(cx, |proj, cx| {
@@ -1715,7 +1983,10 @@ pub(super) fn subscribe_sidebar(
                 }
             }
             SidebarEvent::UnstageFiles(paths) => {
-                let paths = paths.iter().map(std::path::PathBuf::from).collect::<Vec<_>>();
+                let paths = paths
+                    .iter()
+                    .map(std::path::PathBuf::from)
+                    .collect::<Vec<_>>();
                 if !paths.is_empty() {
                     let worktree_path = this.effective_worktree_path(cx);
                     project.update(cx, |proj, cx| {
@@ -1760,6 +2031,101 @@ pub(super) fn subscribe_sidebar(
                 let worktree_path = this.effective_worktree_path(cx);
                 project.update(cx, |proj, cx| {
                     proj.push_at(&name, false, &worktree_path, cx).detach();
+                });
+            }
+            SidebarEvent::RemoteBranchPull(name) => {
+                let worktree_path = this.effective_worktree_path(cx);
+                match project.read(cx).remote_branch_parts_at(&worktree_path, name) {
+                    Ok((remote, branch)) => {
+                        project.update(cx, |proj, cx| {
+                            proj.pull_from_at(&remote, &branch, &worktree_path, cx).detach();
+                        });
+                    }
+                    Err(error) => this.show_toast(error.to_string(), ToastKind::Error, cx),
+                }
+            }
+            SidebarEvent::RemoteBranchCompare(name) => {
+                let Some(current) = project.read(cx).head_branch().map(str::to_string) else {
+                    return;
+                };
+                let remote_branch = name.clone();
+                let repo_path = this.effective_worktree_path(cx);
+                let Some(tab) = this.tabs.get_mut(this.active_tab) else {
+                    return;
+                };
+                let viewer = tab.diff_viewer.clone();
+                let detail = tab.detail_panel.clone();
+                tab.bottom_panel_mode = BottomPanelMode::Diff;
+                let generation = viewer.update(cx, |viewer, cx| {
+                    viewer.set_diff_loading(
+                        format!("{}...{}", current, remote_branch),
+                        DiffSource::Compare {
+                            from: current.clone(),
+                            to: remote_branch.clone(),
+                        },
+                        cx,
+                    )
+                });
+                let compare_current = current.clone();
+                let compare_remote = remote_branch.clone();
+                cx.spawn(async move |_, cx: &mut gpui::AsyncApp| {
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move {
+                            rgitui_git::compute_compare_diff(
+                                &repo_path,
+                                &compare_current,
+                                &compare_remote,
+                            )
+                        })
+                        .await;
+                    cx.update(|cx| {
+                        if viewer.read(cx).generation() != generation {
+                            return;
+                        }
+                        match result {
+                            Ok(diff) => {
+                                if let Some(file) = diff.files.first().cloned() {
+                                    viewer.update(cx, |viewer, cx| {
+                                        viewer.set_diff(
+                                            file.clone(),
+                                            file.path.display().to_string(),
+                                            DiffSource::Compare {
+                                                from: current.clone(),
+                                                to: remote_branch.clone(),
+                                            },
+                                            cx,
+                                        )
+                                    });
+                                } else {
+                                    viewer.update(cx, |viewer, cx| viewer.clear(cx));
+                                }
+                                detail.update(cx, |detail, cx| detail.clear(cx));
+                            }
+                            Err(error) => viewer.update(cx, |viewer, cx| {
+                                viewer.set_error(format!("Compare failed: {}", error), cx)
+                            }),
+                        }
+                    });
+                })
+                .detach();
+            }
+            SidebarEvent::RemoteBranchDelete(name) => {
+                this.dialogs.confirm_dialog.update(cx, |dialog, cx| {
+                    dialog.show_visible(ConfirmAction::RemoteBranchDelete(name.clone()), cx);
+                });
+            }
+            SidebarEvent::RemoteBranchCreatePr(name) => {
+                this.open_create_pr_dialog_for(name.clone(), cx);
+            }
+            SidebarEvent::RemoteAdd => {
+                this.dialogs
+                    .remote_dialog
+                    .update(cx, |dialog, cx| dialog.show_add(cx));
+            }
+            SidebarEvent::RemoteEdit { name, url, is_default } => {
+                this.dialogs.remote_dialog.update(cx, |dialog, cx| {
+                    dialog.show_edit(name.clone(), url.clone(), *is_default, cx)
                 });
             }
             SidebarEvent::RemoteRemove(name) => {
@@ -1918,6 +2284,11 @@ pub(super) fn subscribe_sidebar(
                     wd.show_visible(branch, cx);
                 });
             }
+            SidebarEvent::WorktreeCreateForBranch(branch) => {
+                this.dialogs.worktree_dialog.update(cx, |wd, cx| {
+                    wd.show_visible(Some(branch.clone()), cx);
+                });
+            }
             SidebarEvent::WorktreeRemove(index) => {
                 let worktrees = project.read(cx).worktrees().to_vec();
                 if let Some(wt) = worktrees.get(*index) {
@@ -1967,6 +2338,11 @@ pub(super) fn subscribe_sidebar(
                     bd.show_visible(None, cx);
                 });
             }
+            SidebarEvent::BranchCreateFrom(base) => {
+                this.dialogs.branch_dialog.update(cx, |dialog, cx| {
+                    dialog.show_visible(Some(base.clone()), cx);
+                });
+            }
             SidebarEvent::BranchDelete(name) => {
                 let name = name.clone();
                 this.dialogs.confirm_dialog.update(cx, |cd, cx| {
@@ -2002,6 +2378,14 @@ pub(super) fn subscribe_sidebar(
                 this.dialogs.rename_dialog.update(cx, |rd, cx| {
                     rd.show_visible(name, cx);
                 });
+            }
+            SidebarEvent::TagCreateFrom(name) => {
+                match project.read(cx).resolve_branch_to_oid(name) {
+                    Ok(oid) => this.dialogs.tag_dialog.update(cx, |dialog, cx| {
+                        dialog.show_visible(oid, cx);
+                    }),
+                    Err(error) => this.show_toast(error.to_string(), ToastKind::Error, cx),
+                }
             }
             SidebarEvent::StashDrop(index) => {
                 let index = *index;
@@ -2826,12 +3210,10 @@ pub(super) fn subscribe_diff_viewer(
     let diff_viewer_ref = diff_viewer.clone();
     cx.subscribe(diff_viewer, {
         move |this, _dv, event: &DiffViewerEvent, cx| {
-            if let DiffViewerEvent::DiffChanged {
-                path,
-                ..
-            } = event
-            {
-                if let Some(tab) = this.tabs.iter_mut()
+            if let DiffViewerEvent::DiffChanged { path, .. } = event {
+                if let Some(tab) = this
+                    .tabs
+                    .iter_mut()
                     .find(|tab| tab.diff_viewer == diff_viewer_ref)
                 {
                     if matches!(
@@ -2847,11 +3229,14 @@ pub(super) fn subscribe_diff_viewer(
                 // completed diff should activate the requested inspection.
                 let completed = diff_viewer_ref.read(cx).diff().is_some();
                 if completed {
-                    let requested = this.tabs.iter_mut()
+                    let requested = this
+                        .tabs
+                        .iter_mut()
                         .enumerate()
                         .find(|(_, tab)| tab.diff_viewer == diff_viewer_ref)
                         .and_then(|(index, tab)| {
-                            let mode = tab.pending_file_inspection
+                            let mode = tab
+                                .pending_file_inspection
                                 .as_ref()
                                 .filter(|(target, _)| target == path)
                                 .map(|(_, mode)| *mode)?;
@@ -3105,11 +3490,8 @@ pub(super) fn subscribe_commit_panel(
                 // Freeze the selection for this exact worktree at click time.
                 // Neither checking files nor gathering the list touches Git.
                 let selection = changes_panel.read(cx).commit_selection();
-                let committed_paths: Vec<std::path::PathBuf> = selection
-                    .0
-                    .iter()
-                    .map(|file| file.path.clone())
-                    .collect();
+                let committed_paths: Vec<std::path::PathBuf> =
+                    selection.0.iter().map(|file| file.path.clone()).collect();
                 let previous_head_oid = project
                     .read(cx)
                     .head_oid_at(&worktree_path)
@@ -3137,11 +3519,7 @@ pub(super) fn subscribe_commit_panel(
                         });
                         if succeeded {
                             changes_panel.update(cx, |panel, cx| {
-                                panel.commit_succeeded(
-                                    &worktree_path,
-                                    &committed_paths,
-                                    cx,
-                                );
+                                panel.commit_succeeded(&worktree_path, &committed_paths, cx);
                             });
                             if !is_amend {
                                 if let Some(oid_hex) = previous_head_oid {
@@ -3508,37 +3886,79 @@ pub(super) fn subscribe_submodule_view(
 ) {
     let project = project.clone();
     let submodule_view = submodule_view.clone();
+    let submodule_view_for_events = submodule_view.clone();
 
     cx.subscribe(&submodule_view, {
-        move |this, _sv, event: &SubmoduleViewEvent, cx| match event {
-            SubmoduleViewEvent::InitSubmodule(name) => {
-                let name = name.clone();
-                project.update(cx, |proj, cx| {
-                    proj.submodule_init_async(name.clone(), cx).detach();
-                });
-            }
-            SubmoduleViewEvent::UpdateSubmodule(name) => {
-                let name = name.clone();
-                project.update(cx, |proj, cx| {
-                    proj.submodule_update_async(name.clone(), true, cx).detach();
-                });
-            }
-            SubmoduleViewEvent::InitAll => {
-                project.update(cx, |proj, cx| {
-                    proj.submodule_init_all_async(cx).detach();
-                });
-            }
-            SubmoduleViewEvent::UpdateAll => {
-                project.update(cx, |proj, cx| {
-                    proj.submodule_update_all_async(true, cx).detach();
-                });
-            }
-            SubmoduleViewEvent::Dismissed => {
+        move |this, _sv, event: &SubmoduleViewEvent, cx| {
+            if matches!(event, SubmoduleViewEvent::Dismissed) {
                 if let Some(tab) = this.tabs.get_mut(this.active_tab) {
                     tab.bottom_panel_mode = BottomPanelMode::Diff;
                     cx.notify();
                 }
+                return;
             }
+            let task: gpui::Task<anyhow::Result<()>> = match event {
+                SubmoduleViewEvent::InitSubmodule(name) => {
+                    let name = name.clone();
+                    let task =
+                        project.update(cx, |project, cx| project.submodule_init_async(name, cx));
+                    cx.spawn(async move |_this, _cx| task.await)
+                }
+                SubmoduleViewEvent::UpdateSubmodule(name) => {
+                    let name = name.clone();
+                    let task = project.update(cx, |project, cx| {
+                        project.submodule_update_async(name, true, cx)
+                    });
+                    cx.spawn(async move |_this, _cx| task.await)
+                }
+                SubmoduleViewEvent::InitAll => {
+                    let task =
+                        project.update(cx, |project, cx| project.submodule_init_all_async(cx));
+                    cx.spawn(async move |_this, _cx| task.await.map(|_| ()))
+                }
+                SubmoduleViewEvent::UpdateAll => {
+                    let task = project.update(cx, |project, cx| {
+                        project.submodule_update_all_async(true, cx)
+                    });
+                    cx.spawn(async move |_this, _cx| task.await.map(|_| ()))
+                }
+                SubmoduleViewEvent::Dismissed => unreachable!(),
+            };
+            let view = submodule_view_for_events.clone();
+            let project = project.clone();
+            cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
+                let result = task.await;
+                let submodules = if result.is_ok() {
+                    let refresh = project.update(cx, |project, cx| project.submodules_async(cx));
+                    refresh.await.ok()
+                } else {
+                    None
+                };
+                cx.update(|cx| {
+                    if let Some(submodules) = submodules {
+                        view.update(cx, |view, cx| view.set_submodules(submodules.clone(), cx));
+                        let _ = this.update(cx, |workspace, cx| {
+                            if let Some(tab) =
+                                workspace.tabs.iter().find(|tab| tab.project == project)
+                            {
+                                tab.sidebar.update(cx, |sidebar, cx| {
+                                    sidebar.update_submodules(submodules, cx)
+                                });
+                            }
+                            workspace.show_toast(
+                                "子模块操作完成".to_string(),
+                                ToastKind::Success,
+                                cx,
+                            );
+                        });
+                    } else if let Err(error) = result {
+                        let _ = this.update(cx, |workspace, cx| {
+                            workspace.show_toast(error.to_string(), ToastKind::Error, cx);
+                        });
+                    }
+                });
+            })
+            .detach();
         }
     })
     .detach();

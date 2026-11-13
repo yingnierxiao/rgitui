@@ -15,7 +15,8 @@ use gpui::{
     UniformListScrollHandle, WeakEntity, Window,
 };
 use rgitui_git::{
-    BranchInfo, FileChangeKind, FileStatus, RemoteInfo, StashEntry, TagInfo, WorktreeInfo,
+    BranchInfo, FileChangeKind, FileStatus, RemoteInfo, StashEntry, SubmoduleInfo, TagInfo,
+    WorktreeInfo,
 };
 use rgitui_i18n::{key, t};
 use rgitui_settings::{Compactness, SettingsState};
@@ -34,13 +35,25 @@ pub enum SidebarEvent {
     BranchSelected(String),
     BranchCheckout(String),
     BranchCreate,
+    BranchCreateFrom(String),
     BranchDelete(String),
     BranchRename(String),
+    TagCreateFrom(String),
     BranchCopyName(String),
     MergeBranch(String),
+    RemoteBranchPull(String),
+    RemoteBranchCompare(String),
+    RemoteBranchCreatePr(String),
+    RemoteBranchDelete(String),
     RemoteFetch(String),
     RemotePull(String),
     RemotePush(String),
+    RemoteAdd,
+    RemoteEdit {
+        name: String,
+        url: String,
+        is_default: bool,
+    },
     RemoteRemove(String),
     TagSelected(String),
     TagCheckout(String),
@@ -52,7 +65,16 @@ pub enum SidebarEvent {
     StashBranch(usize),
     WorktreeSelected(usize),
     WorktreeCreate,
+    WorktreeCreateForBranch(String),
     WorktreeRemove(usize),
+    AddSubmodule,
+    OpenSubmodule(String),
+    RemoveSubmodule(String),
+    ChangeSubmoduleUrl {
+        name: String,
+        path: String,
+        url: String,
+    },
     FileSelected {
         path: String,
         staged: bool,
@@ -92,6 +114,7 @@ enum SidebarSection {
     Tags,
     Stashes,
     Worktrees,
+    Submodules,
     StagedChanges,
     UnstagedChanges,
 }
@@ -139,6 +162,7 @@ enum SidebarItem {
     Tag(usize),          // index into tags
     Stash(usize),        // index into stashes
     Worktree(usize),     // index into worktrees
+    Submodule(usize),
     StagedFile(usize),   // index into staged files
     StagedDir(String),   // collapsed_dirs key for a staged directory row
     UnstagedFile(usize), // index into unstaged files
@@ -150,6 +174,21 @@ struct StashContextMenuState {
     /// The index of the stash that was right-clicked.
     stash_index: usize,
     /// Window-relative position where the menu should appear.
+    position: Point<Pixels>,
+}
+
+struct LocalBranchContextMenuState {
+    name: String,
+    position: Point<Pixels>,
+}
+
+struct SubmoduleContextMenuState {
+    index: usize,
+    position: Point<Pixels>,
+}
+
+struct RemoteBranchContextMenuState {
+    index: usize,
     position: Point<Pixels>,
 }
 
@@ -273,6 +312,7 @@ fn section_row_cap(section: SidebarSection, compactness: Compactness) -> Option<
         SidebarSection::Remotes
         | SidebarSection::Stashes
         | SidebarSection::Worktrees
+        | SidebarSection::Submodules
         | SidebarSection::StagedChanges
         | SidebarSection::UnstagedChanges => None,
     }
@@ -287,6 +327,7 @@ struct SidebarListHeights {
     tags: f32,
     stashes: f32,
     worktrees: f32,
+    submodules: f32,
     staged: f32,
     unstaged: f32,
 }
@@ -361,6 +402,7 @@ pub struct Sidebar {
     remotes: Vec<RemoteInfo>,
     stashes: Vec<StashEntry>,
     worktrees: Vec<WorktreeInfo>,
+    submodules: Vec<SubmoduleInfo>,
     staged: Vec<FileStatus>,
     unstaged: Vec<FileStatus>,
     selected_file: Option<(String, bool)>,
@@ -433,6 +475,9 @@ pub struct Sidebar {
     current_user_email: Option<String>,
     /// Right-click context menu for stashes.
     stash_context_menu: Option<StashContextMenuState>,
+    local_branch_context_menu: Option<LocalBranchContextMenuState>,
+    submodule_context_menu: Option<SubmoduleContextMenuState>,
+    remote_branch_context_menu: Option<RemoteBranchContextMenuState>,
     /// Cached bounds of the sidebar panel container (updated via on_allocate).
     container_bounds: Bounds<Pixels>,
     local_branches_scroll: UniformListScrollHandle,
@@ -441,6 +486,7 @@ pub struct Sidebar {
     tags_scroll: UniformListScrollHandle,
     stashes_scroll: UniformListScrollHandle,
     worktrees_scroll: UniformListScrollHandle,
+    submodules_scroll: UniformListScrollHandle,
     staged_scroll: UniformListScrollHandle,
     unstaged_scroll: UniformListScrollHandle,
 }
@@ -514,6 +560,7 @@ impl Sidebar {
             SidebarItem::SectionHeader(SidebarSection::Tags),
             SidebarItem::SectionHeader(SidebarSection::Stashes),
             SidebarItem::SectionHeader(SidebarSection::Worktrees),
+            SidebarItem::SectionHeader(SidebarSection::Submodules),
             SidebarItem::SectionHeader(SidebarSection::StagedChanges),
             SidebarItem::SectionHeader(SidebarSection::UnstagedChanges),
         ];
@@ -564,6 +611,7 @@ impl Sidebar {
             remotes: Vec::new(),
             stashes: Vec::new(),
             worktrees: Vec::new(),
+            submodules: Vec::new(),
             staged: Vec::new(),
             unstaged: Vec::new(),
             selected_file: None,
@@ -600,6 +648,9 @@ impl Sidebar {
             my_branches_active: false,
             current_user_email: None,
             stash_context_menu: None,
+            local_branch_context_menu: None,
+            submodule_context_menu: None,
+            remote_branch_context_menu: None,
             container_bounds: Bounds::new(Point::new(px(0.), px(0.)), Size::new(px(0.), px(0.))),
             local_branches_scroll: UniformListScrollHandle::new(),
             remotes_scroll: UniformListScrollHandle::new(),
@@ -607,6 +658,7 @@ impl Sidebar {
             tags_scroll: UniformListScrollHandle::new(),
             stashes_scroll: UniformListScrollHandle::new(),
             worktrees_scroll: UniformListScrollHandle::new(),
+            submodules_scroll: UniformListScrollHandle::new(),
             staged_scroll: UniformListScrollHandle::new(),
             unstaged_scroll: UniformListScrollHandle::new(),
         }
@@ -633,6 +685,29 @@ impl Sidebar {
             cx.notify();
         }
     }
+
+    fn dismiss_submodule_context_menu(&mut self, cx: &mut Context<Self>) {
+        if self.submodule_context_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn show_local_branch_context_menu(
+        &mut self,
+        name: String,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.local_branch_context_menu = Some(LocalBranchContextMenuState { name, position });
+        cx.notify();
+    }
+
+    fn dismiss_local_branch_context_menu(&mut self, cx: &mut Context<Self>) {
+        if self.local_branch_context_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
 
     /// Returns the branch indices that pass the current branch filter and "My Branches" toggle.
     fn filtered_local_indices(&self, current_user_email: Option<&str>) -> Vec<usize> {
@@ -770,6 +845,13 @@ impl Sidebar {
             }
         }
 
+        items.push(SidebarItem::SectionHeader(SidebarSection::Submodules));
+        if is_expanded(SidebarSection::Submodules, &self.expanded_sections) {
+            for i in 0..self.submodules.len() {
+                items.push(SidebarItem::Submodule(i));
+            }
+        }
+
         if self.show_change_sections {
             items.push(SidebarItem::SectionHeader(SidebarSection::StagedChanges));
         }
@@ -841,6 +923,7 @@ impl Sidebar {
             SidebarSection::Tags => &self.tags_scroll,
             SidebarSection::Stashes => &self.stashes_scroll,
             SidebarSection::Worktrees => &self.worktrees_scroll,
+            SidebarSection::Submodules => &self.submodules_scroll,
             SidebarSection::StagedChanges => &self.staged_scroll,
             SidebarSection::UnstagedChanges => &self.unstaged_scroll,
         };
@@ -885,6 +968,13 @@ impl Sidebar {
             }
             SidebarItem::Worktree(i) => {
                 cx.emit(SidebarEvent::WorktreeSelected(i));
+            }
+            SidebarItem::Submodule(i) => {
+                if let Some(submodule) = self.submodules.get(i) {
+                    cx.emit(SidebarEvent::OpenSubmodule(
+                        submodule.path.display().to_string(),
+                    ));
+                }
             }
             SidebarItem::StagedFile(i) => {
                 if let Some(file) = self.staged.get(i) {
@@ -1149,6 +1239,21 @@ impl Sidebar {
         cx.notify();
     }
 
+    pub fn update_submodules(&mut self, submodules: Vec<SubmoduleInfo>, cx: &mut Context<Self>) {
+        if self.submodules == submodules {
+            return;
+        }
+        self.submodules = submodules;
+        self.rebuild_nav_items();
+        cx.notify();
+    }
+
+    pub fn submodule_by_path(&self, path: &Path) -> Option<&SubmoduleInfo> {
+        self.submodules
+            .iter()
+            .find(|submodule| submodule.path == path)
+    }
+
     pub fn update_worktrees(&mut self, worktrees: Vec<WorktreeInfo>, cx: &mut Context<Self>) {
         if self.worktrees == worktrees {
             return;
@@ -1171,6 +1276,32 @@ impl Sidebar {
         self.flattened_worktrees.extend(0..self.worktrees.len());
 
         cx.notify();
+    }
+
+    fn show_submodule_context_menu(
+        &mut self,
+        index: usize,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.submodule_context_menu = Some(SubmoduleContextMenuState { index, position });
+        cx.notify();
+    }
+
+    fn show_remote_branch_context_menu(
+        &mut self,
+        index: usize,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.remote_branch_context_menu = Some(RemoteBranchContextMenuState { index, position });
+        cx.notify();
+    }
+
+    fn dismiss_remote_branch_context_menu(&mut self, cx: &mut Context<Self>) {
+        if self.remote_branch_context_menu.take().is_some() {
+            cx.notify();
+        }
     }
 
     pub fn set_selected_worktree_by_path(&mut self, path: Option<&Path>, cx: &mut Context<Self>) {
@@ -1203,9 +1334,13 @@ impl Sidebar {
         } else {
             drop(self.unstaged.splice(index..=index, children));
         }
-        if self.selected_file.as_ref().is_some_and(|(selected, staged)| {
-            !*staged && PathBuf::from(selected.as_str()) == directory
-        }) {
+        if self
+            .selected_file
+            .as_ref()
+            .is_some_and(|(selected, staged)| {
+                !*staged && PathBuf::from(selected.as_str()) == directory
+            })
+        {
             self.selected_file = None;
         }
         if self.show_change_sections {
@@ -1653,7 +1788,7 @@ impl Sidebar {
     /// the repo header, the eight section headers, placeholder rows of
     /// expanded-but-empty sections, and the separator.
     fn chrome_height(&self, item_h: f32, header_h: f32) -> f32 {
-        let section_count = if self.show_change_sections { 8.0 } else { 6.0 };
+        let section_count = if self.show_change_sections { 9.0 } else { 7.0 };
         let mut chrome = header_h + section_count * item_h;
         if self.show_change_sections {
             chrome += SIDEBAR_SEPARATOR_HEIGHT;
@@ -1672,6 +1807,7 @@ impl Sidebar {
             (SidebarSection::Tags, self.tags.is_empty()),
             (SidebarSection::Stashes, self.stashes.is_empty()),
             (SidebarSection::Worktrees, self.worktrees.is_empty()),
+            (SidebarSection::Submodules, self.submodules.is_empty()),
             (SidebarSection::StagedChanges, self.staged.is_empty()),
             (SidebarSection::UnstagedChanges, self.unstaged.is_empty()),
         ];
@@ -1728,6 +1864,7 @@ impl Sidebar {
             rows(SidebarSection::Tags, self.flattened_tags.len()),
             rows(SidebarSection::Stashes, self.stashes.len()),
             rows(SidebarSection::Worktrees, self.flattened_worktrees.len()),
+            rows(SidebarSection::Submodules, self.submodules.len()),
             rows(SidebarSection::StagedChanges, self.flattened_staged.len()),
             rows(
                 SidebarSection::UnstagedChanges,
@@ -1755,8 +1892,9 @@ impl Sidebar {
             tags: heights[3],
             stashes: heights[4],
             worktrees: heights[5],
-            staged: heights[6],
-            unstaged: heights[7],
+            submodules: heights[6],
+            staged: heights[7],
+            unstaged: heights[8],
         }
     }
 
@@ -2315,7 +2453,9 @@ impl Render for Sidebar {
                         let is_head = branch.is_head;
 
                         let w_click = w.clone();
+                        let w_context = w.clone();
                         let branch_name_for_click = name.clone();
+                        let context_branch_name = name.to_string();
 
                         let mut item = div()
                             .id(ElementId::NamedInteger("local-branch".into(), i as u64))
@@ -2333,6 +2473,20 @@ impl Render for Sidebar {
                             })
                             .hover(|s| s.bg(colors.ghost_element_hover))
                             .active(|s| s.bg(colors.ghost_element_active))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                move |event: &MouseDownEvent, _, cx| {
+                                    w_context
+                                        .update(cx, |sidebar, cx| {
+                                            sidebar.show_local_branch_context_menu(
+                                                context_branch_name.clone(),
+                                                event.position,
+                                                cx,
+                                            )
+                                        })
+                                        .ok();
+                                },
+                            )
                             .cursor_pointer()
                             .on_click(move |event: &ClickEvent, _: &mut Window, cx: &mut App| {
                                 if event.click_count() >= 2 {
@@ -2638,6 +2792,15 @@ impl Render for Sidebar {
                                 .size(LabelSize::XSmall)
                                 .color(Color::Muted),
                         ),
+                )
+                .child(
+                    IconButton::new("remote-add", IconName::Plus)
+                        .size(ButtonSize::Compact)
+                        .color(Color::Info)
+                        .tooltip("添加远程仓库")
+                        .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
+                            cx.emit(SidebarEvent::RemoteAdd);
+                        })),
                 ),
         );
 
@@ -2685,7 +2848,16 @@ impl Render for Sidebar {
                                     let fetch_remote = remote_name.clone();
                                     let pull_remote = remote_name.clone();
                                     let push_remote = remote_name.clone();
+                                    let edit_remote = remote_name.clone();
+                                    let edit_url = remote
+                                        .url
+                                        .as_deref()
+                                        .or(remote.push_url.as_deref())
+                                        .unwrap_or("")
+                                        .to_string();
                                     let remove_remote = remote_name.clone();
+                                    let edit_is_default = remote.is_default;
+                                    let is_default = remote.is_default;
 
                                     let mut item = div()
                                         .id(ElementId::NamedInteger("remote-item".into(), i as u64))
@@ -2707,6 +2879,7 @@ impl Render for Sidebar {
                                     let w_fetch = w.clone();
                                     let w_pull = w.clone();
                                     let w_push = w.clone();
+                                    let w_edit = w.clone();
                                     let w_remove = w.clone();
 
                                     item = item.child(
@@ -2727,6 +2900,13 @@ impl Render for Sidebar {
                                                     .weight(gpui::FontWeight::SEMIBOLD)
                                                     .truncate(),
                                             )
+                                            .when(is_default, |el| {
+                                                el.child(
+                                                    Label::new("默认")
+                                                        .size(LabelSize::XSmall)
+                                                        .color(Color::Accent),
+                                                )
+                                            })
                                             .child(div().flex_1())
                                             .child(
                                                 IconButton::new(
@@ -2747,6 +2927,29 @@ impl Render for Sidebar {
                                                                     fetch_remote.to_string(),
                                                                 ));
                                                             });
+                                                    },
+                                                ),
+                                            )
+                                            .child(
+                                                IconButton::new(
+                                                    ElementId::NamedInteger(
+                                                        "remote-edit".into(),
+                                                        i as u64,
+                                                    ),
+                                                    IconName::Edit,
+                                                )
+                                                .size(ButtonSize::Compact)
+                                                .color(Color::Muted)
+                                                .tooltip("修改远程地址")
+                                                .on_click(
+                                                    move |_: &ClickEvent, _, cx: &mut App| {
+                                                        let _ = w_edit.clone().update(cx, |_, cx| {
+                                                            cx.emit(SidebarEvent::RemoteEdit {
+                                                                name: edit_remote.to_string(),
+                                                                url: edit_url.clone(),
+                                                                is_default: edit_is_default,
+                                                            });
+                                                        });
                                                     },
                                                 ),
                                             )
@@ -2961,6 +3164,7 @@ impl Render for Sidebar {
                             let name: SharedString = branch.name.clone().into();
                             let remote_branch_name = name.clone();
                             let w_item = w.clone();
+                            let w_menu = w.clone();
 
                             div()
                                 .id(ElementId::NamedInteger("remote-branch".into(), i as u64))
@@ -2978,6 +3182,20 @@ impl Render for Sidebar {
                                 })
                                 .hover(|s| s.bg(colors.ghost_element_hover))
                                 .active(|s| s.bg(colors.ghost_element_active))
+                                .on_mouse_down(
+                                    MouseButton::Right,
+                                    move |event: &MouseDownEvent, _, cx| {
+                                        w_menu
+                                            .update(cx, |sidebar, cx| {
+                                                sidebar.show_remote_branch_context_menu(
+                                                    branch_idx,
+                                                    event.position,
+                                                    cx,
+                                                )
+                                            })
+                                            .ok();
+                                    },
+                                )
                                 .on_click(
                                     move |event: &ClickEvent, _: &mut Window, cx: &mut App| {
                                         if event.click_count() >= 2 {
@@ -3764,146 +3982,83 @@ impl Render for Sidebar {
             }
         }
 
-        // The legacy file trees are hidden in navigation-only mode.
-        if self.show_change_sections {
-        // Separator between refs and file changes
-        content = content.child(div().w_full().h(px(1.)).my(px(4.)).bg(colors.border));
-
-        // -- Staged Changes --
-        let staged_expanded = self.is_expanded(SidebarSection::StagedChanges);
-        let staged_count = self.staged.len();
-        let has_staged = staged_count > 0;
-        let staged_kind_counts = Self::file_kind_counts(&self.staged);
-
-        let kb_active = keyboard_index == Some(nav_idx);
+        // -- Submodules --
+        let submodules_expanded = self.is_expanded(SidebarSection::Submodules);
+        let submodule_header_index = nav_idx;
         nav_idx += 1;
-
-        let staged_chevron = if staged_expanded {
+        let submodule_icon = if submodules_expanded {
             IconName::ChevronDown
         } else {
             IconName::ChevronRight
         };
-        let mut staged_header = div()
-            .id("section-staged")
-            .h_flex()
-            .w_full()
-            .h(px(item_h))
-            .px(px(8.))
-            .gap(px(4.))
-            .items_center()
-            .bg(colors.toolbar_background)
-            .border_b_1()
-            .border_color(colors.border_variant)
-            .when(kb_active, |el| el.border_l_2().border_color(kb_accent))
-            .hover(|s| s.bg(colors.ghost_element_hover))
-            .active(|s| s.bg(colors.ghost_element_active))
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.toggle_section(SidebarSection::StagedChanges, cx);
-            }))
-            .child(
-                rgitui_ui::Icon::new(staged_chevron)
-                    .size(rgitui_ui::IconSize::XSmall)
-                    .color(Color::Muted),
-            )
-            .child(
-                Label::new(t!("sidebar.staged"))
-                    .size(LabelSize::XSmall)
-                    .weight(gpui::FontWeight::SEMIBOLD)
-                    .color(Color::Muted),
-            )
-            .child(
-                rgitui_ui::Icon::new(IconName::Check)
-                    .size(rgitui_ui::IconSize::XSmall)
-                    .color(if has_staged {
-                        Color::Added
-                    } else {
-                        Color::Muted
-                    }),
-            );
-
-        if has_staged {
-            let kind_order = [
-                FileChangeKind::Added,
-                FileChangeKind::Modified,
-                FileChangeKind::Deleted,
-                FileChangeKind::Renamed,
-                FileChangeKind::Copied,
-                FileChangeKind::TypeChange,
-                FileChangeKind::Untracked,
-                FileChangeKind::UntrackedDirectory,
-                FileChangeKind::Conflicted,
-            ];
-            let mut breakdown = div().h_flex().gap(px(4.));
-            for kind in &kind_order {
-                if let Some(&count) = staged_kind_counts.get(kind) {
-                    if count > 0 {
-                        breakdown = breakdown.child(
-                            Label::new(SharedString::from(format!(
-                                "{}{}",
-                                Self::file_change_symbol(*kind),
-                                count
-                            )))
-                            .size(LabelSize::XSmall)
-                            .color(Self::file_change_color(*kind)),
-                        );
-                    }
-                }
-            }
-            staged_header = staged_header.child(breakdown);
-        }
-
-        staged_header = staged_header
-            .child(div().flex_1())
-            .when(has_staged, |el| {
-                el.child(
-                    div().id("unstage-all-btn").child(
-                        Button::new("unstage-all", t!("sidebar.unstage_all"))
-                            .icon(IconName::Minus)
-                            .size(ButtonSize::Compact)
-                            .style(ButtonStyle::Subtle)
-                            .color(Color::Muted)
-                            .on_click(cx.listener(|_this, _: &ClickEvent, _, cx| {
-                                cx.emit(SidebarEvent::UnstageAll);
-                            })),
-                    ),
+        let add_submodule_sidebar = sidebar_weak.clone();
+        content = content.child(
+            div()
+                .id("section-submodules")
+                .h_flex()
+                .w_full()
+                .h(px(item_h))
+                .px(px(8.))
+                .gap(px(4.))
+                .items_center()
+                .bg(colors.toolbar_background)
+                .border_b_1()
+                .border_color(colors.border_variant)
+                .when(keyboard_index == Some(submodule_header_index), |el| {
+                    el.border_l_2().border_color(kb_accent)
+                })
+                .hover(|s| s.bg(colors.ghost_element_hover))
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.toggle_section(SidebarSection::Submodules, cx)
+                }))
+                .child(
+                    rgitui_ui::Icon::new(submodule_icon)
+                        .size(rgitui_ui::IconSize::XSmall)
+                        .color(Color::Muted),
                 )
-            })
-            .child(self.render_popover_trigger(
-                SidebarPopover::ChangeListOptions(ChangeList::Staged),
-                "staged-options",
-                t!("sidebar.staged_options.tooltip"),
-                show_line_stats,
-                cx,
-            ))
-            .child(
-                div()
-                    .h_flex()
-                    .h(px(16.))
-                    .min_w(px(20.))
-                    .px(px(6.))
-                    .rounded(px(5.))
-                    .bg(if staged_count > 0 {
-                        colors.ghost_element_selected
-                    } else {
-                        colors.ghost_element_hover
-                    })
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        Label::new(SharedString::from(format!("{}", staged_count)))
-                            .size(LabelSize::XSmall)
-                            .color(if staged_count > 0 {
-                                Color::Added
-                            } else {
-                                Color::Muted
-                            }),
-                    ),
-            );
-        content = content.child(staged_header);
-
-        if staged_expanded {
-            if self.staged.is_empty() {
+                .child(
+                    rgitui_ui::Icon::new(IconName::Folder)
+                        .size(rgitui_ui::IconSize::XSmall)
+                        .color(Color::Muted),
+                )
+                .child(
+                    Label::new("子模块")
+                        .size(LabelSize::XSmall)
+                        .weight(gpui::FontWeight::SEMIBOLD)
+                        .color(Color::Muted),
+                )
+                .child(div().flex_1())
+                .child(
+                    IconButton::new("add-submodule", IconName::Plus)
+                        .size(ButtonSize::Compact)
+                        .color(Color::Muted)
+                        .tooltip("添加子模块")
+                        .on_click(move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                            add_submodule_sidebar
+                                .update(cx, |_, cx| cx.emit(SidebarEvent::AddSubmodule))
+                                .ok();
+                        }),
+                )
+                .child(
+                    div()
+                        .h_flex()
+                        .h(px(15.))
+                        .min_w(px(18.))
+                        .px(px(5.))
+                        .rounded(px(3.))
+                        .bg(colors.ghost_element_hover)
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            Label::new(SharedString::from(self.submodules.len().to_string()))
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                        ),
+                ),
+        );
+        if submodules_expanded {
+            if self.submodules.is_empty() {
                 content = content.child(
                     div()
                         .h_flex()
@@ -3912,21 +4067,263 @@ impl Render for Sidebar {
                         .px(px(16.))
                         .items_center()
                         .child(
-                            Label::new(t!("sidebar.no_staged"))
+                            Label::new("没有子模块")
                                 .size(LabelSize::XSmall)
                                 .color(Color::Placeholder),
                         ),
                 );
             } else {
                 let nav_base = nav_idx;
-                nav_idx += self.flattened_staged.len();
-                let flattened = self.flattened_staged.clone();
-                let list_height = list_heights.staged;
-                let files = self.staged.clone();
-                let selected_file = self.selected_file.clone();
-                let w = Rc::new(sidebar_weak.clone());
-                let colors = colors.clone();
-                let list = uniform_list(
+                nav_idx += self.submodules.len();
+                let submodules = self.submodules.clone();
+                let weak = sidebar_weak.clone();
+                let list_height = list_heights.submodules;
+                content = content.child(
+                    uniform_list(
+                        "submodules-list",
+                        submodules.len(),
+                        move |range: Range<usize>, _window: &mut Window, _cx: &mut App| {
+                            range
+                                .map(|i| {
+                                    let submodule = &submodules[i];
+                                    let name = submodule.name.clone();
+                                    let path = submodule.path.display().to_string();
+                                    let status = submodule.status();
+                                    let weak_click = weak.clone();
+                                    let weak_menu = weak.clone();
+                                    div()
+                                        .id(ElementId::NamedInteger(
+                                            "submodule-row".into(),
+                                            i as u64,
+                                        ))
+                                        .h_flex()
+                                        .w_full()
+                                        .h(px(item_h))
+                                        .px_2()
+                                        .pl(px(16.))
+                                        .gap_1()
+                                        .items_center()
+                                        .when(keyboard_index == Some(nav_base + i), |el| {
+                                            el.bg(colors.ghost_element_hover)
+                                                .border_l_2()
+                                                .border_color(kb_accent)
+                                        })
+                                        .hover(|s| s.bg(colors.ghost_element_hover))
+                                        .on_mouse_down(
+                                            MouseButton::Right,
+                                            move |event: &MouseDownEvent, _, cx| {
+                                                weak_menu
+                                                    .update(cx, |sidebar, cx| {
+                                                        sidebar.show_submodule_context_menu(
+                                                            i,
+                                                            event.position,
+                                                            cx,
+                                                        )
+                                                    })
+                                                    .ok();
+                                            },
+                                        )
+                                        .on_click(move |_: &ClickEvent, _, cx| {
+                                            weak_click
+                                                .update(cx, |_, cx| {
+                                                    cx.emit(SidebarEvent::OpenSubmodule(
+                                                        path.clone(),
+                                                    ))
+                                                })
+                                                .ok();
+                                        })
+                                        .child(
+                                            rgitui_ui::Icon::new(IconName::GitBranch)
+                                                .size(rgitui_ui::IconSize::XSmall)
+                                                .color(if status == "up to date" {
+                                                    Color::Success
+                                                } else {
+                                                    Color::Muted
+                                                }),
+                                        )
+                                        .child(Label::new(name).size(LabelSize::XSmall).truncate())
+                                        .child(div().flex_1())
+                                        .child(Label::new(status).size(LabelSize::XSmall).color(
+                                            if status == "up to date" {
+                                                Color::Success
+                                            } else {
+                                                Color::Muted
+                                            },
+                                        ))
+                                })
+                                .collect::<Vec<_>>()
+                        },
+                    )
+                    .h(px(list_height))
+                    .with_sizing_behavior(ListSizingBehavior::Auto)
+                    .track_scroll(&self.submodules_scroll),
+                );
+            }
+        }
+
+        // The legacy file trees are hidden in navigation-only mode.
+        if self.show_change_sections {
+            // Separator between refs and file changes
+            content = content.child(div().w_full().h(px(1.)).my(px(4.)).bg(colors.border));
+
+            // -- Staged Changes --
+            let staged_expanded = self.is_expanded(SidebarSection::StagedChanges);
+            let staged_count = self.staged.len();
+            let has_staged = staged_count > 0;
+            let staged_kind_counts = Self::file_kind_counts(&self.staged);
+
+            let kb_active = keyboard_index == Some(nav_idx);
+            nav_idx += 1;
+
+            let staged_chevron = if staged_expanded {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            };
+            let mut staged_header = div()
+                .id("section-staged")
+                .h_flex()
+                .w_full()
+                .h(px(item_h))
+                .px(px(8.))
+                .gap(px(4.))
+                .items_center()
+                .bg(colors.toolbar_background)
+                .border_b_1()
+                .border_color(colors.border_variant)
+                .when(kb_active, |el| el.border_l_2().border_color(kb_accent))
+                .hover(|s| s.bg(colors.ghost_element_hover))
+                .active(|s| s.bg(colors.ghost_element_active))
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.toggle_section(SidebarSection::StagedChanges, cx);
+                }))
+                .child(
+                    rgitui_ui::Icon::new(staged_chevron)
+                        .size(rgitui_ui::IconSize::XSmall)
+                        .color(Color::Muted),
+                )
+                .child(
+                    Label::new(t!("sidebar.staged"))
+                        .size(LabelSize::XSmall)
+                        .weight(gpui::FontWeight::SEMIBOLD)
+                        .color(Color::Muted),
+                )
+                .child(
+                    rgitui_ui::Icon::new(IconName::Check)
+                        .size(rgitui_ui::IconSize::XSmall)
+                        .color(if has_staged {
+                            Color::Added
+                        } else {
+                            Color::Muted
+                        }),
+                );
+
+            if has_staged {
+                let kind_order = [
+                    FileChangeKind::Added,
+                    FileChangeKind::Modified,
+                    FileChangeKind::Deleted,
+                    FileChangeKind::Renamed,
+                    FileChangeKind::Copied,
+                    FileChangeKind::TypeChange,
+                    FileChangeKind::Untracked,
+                    FileChangeKind::UntrackedDirectory,
+                    FileChangeKind::Conflicted,
+                ];
+                let mut breakdown = div().h_flex().gap(px(4.));
+                for kind in &kind_order {
+                    if let Some(&count) = staged_kind_counts.get(kind) {
+                        if count > 0 {
+                            breakdown = breakdown.child(
+                                Label::new(SharedString::from(format!(
+                                    "{}{}",
+                                    Self::file_change_symbol(*kind),
+                                    count
+                                )))
+                                .size(LabelSize::XSmall)
+                                .color(Self::file_change_color(*kind)),
+                            );
+                        }
+                    }
+                }
+                staged_header = staged_header.child(breakdown);
+            }
+
+            staged_header = staged_header
+                .child(div().flex_1())
+                .when(has_staged, |el| {
+                    el.child(
+                        div().id("unstage-all-btn").child(
+                            Button::new("unstage-all", t!("sidebar.unstage_all"))
+                                .icon(IconName::Minus)
+                                .size(ButtonSize::Compact)
+                                .style(ButtonStyle::Subtle)
+                                .color(Color::Muted)
+                                .on_click(cx.listener(|_this, _: &ClickEvent, _, cx| {
+                                    cx.emit(SidebarEvent::UnstageAll);
+                                })),
+                        ),
+                    )
+                })
+                .child(self.render_popover_trigger(
+                    SidebarPopover::ChangeListOptions(ChangeList::Staged),
+                    "staged-options",
+                    t!("sidebar.staged_options.tooltip"),
+                    show_line_stats,
+                    cx,
+                ))
+                .child(
+                    div()
+                        .h_flex()
+                        .h(px(16.))
+                        .min_w(px(20.))
+                        .px(px(6.))
+                        .rounded(px(5.))
+                        .bg(if staged_count > 0 {
+                            colors.ghost_element_selected
+                        } else {
+                            colors.ghost_element_hover
+                        })
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            Label::new(SharedString::from(format!("{}", staged_count)))
+                                .size(LabelSize::XSmall)
+                                .color(if staged_count > 0 {
+                                    Color::Added
+                                } else {
+                                    Color::Muted
+                                }),
+                        ),
+                );
+            content = content.child(staged_header);
+
+            if staged_expanded {
+                if self.staged.is_empty() {
+                    content = content.child(
+                        div()
+                            .h_flex()
+                            .w_full()
+                            .h(px(28.))
+                            .px(px(16.))
+                            .items_center()
+                            .child(
+                                Label::new(t!("sidebar.no_staged"))
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Placeholder),
+                            ),
+                    );
+                } else {
+                    let nav_base = nav_idx;
+                    nav_idx += self.flattened_staged.len();
+                    let flattened = self.flattened_staged.clone();
+                    let list_height = list_heights.staged;
+                    let files = self.staged.clone();
+                    let selected_file = self.selected_file.clone();
+                    let w = Rc::new(sidebar_weak.clone());
+                    let colors = colors.clone();
+                    let list = uniform_list(
                     "staged-file-list",
                     flattened.len(),
                     move |range: Range<usize>, _window: &mut Window, cx: &mut App| {
@@ -4098,183 +4495,183 @@ impl Render for Sidebar {
                 .h(px(list_height))
                 .with_sizing_behavior(ListSizingBehavior::Auto)
                 .track_scroll(&self.staged_scroll);
-                content = content.child(list);
+                    content = content.child(list);
+                }
             }
-        }
 
-        // -- Unstaged Changes --
-        let unstaged_expanded = self.is_expanded(SidebarSection::UnstagedChanges);
-        let unstaged_count = self.unstaged.len();
-        let has_unstaged = unstaged_count > 0;
-        let unstaged_kind_counts = Self::file_kind_counts(&self.unstaged);
+            // -- Unstaged Changes --
+            let unstaged_expanded = self.is_expanded(SidebarSection::UnstagedChanges);
+            let unstaged_count = self.unstaged.len();
+            let has_unstaged = unstaged_count > 0;
+            let unstaged_kind_counts = Self::file_kind_counts(&self.unstaged);
 
-        let kb_active = keyboard_index == Some(nav_idx);
-        nav_idx += 1;
-        // Unstaged is the final navigable section, so `nav_idx` is not advanced
-        // past its rows; this base anchors the list rows in the shared flat
-        // keyboard-navigation index space.
-        let unstaged_nav_base = nav_idx;
+            let kb_active = keyboard_index == Some(nav_idx);
+            nav_idx += 1;
+            // Unstaged is the final navigable section, so `nav_idx` is not advanced
+            // past its rows; this base anchors the list rows in the shared flat
+            // keyboard-navigation index space.
+            let unstaged_nav_base = nav_idx;
 
-        let unstaged_chevron = if unstaged_expanded {
-            IconName::ChevronDown
-        } else {
-            IconName::ChevronRight
-        };
-        let mut unstaged_header = div()
-            .id("section-unstaged")
-            .h_flex()
-            .w_full()
-            .h(px(item_h))
-            .px(px(8.))
-            .gap(px(4.))
-            .items_center()
-            .bg(colors.toolbar_background)
-            .border_b_1()
-            .border_color(colors.border_variant)
-            .when(kb_active, |el| el.border_l_2().border_color(kb_accent))
-            .hover(|s| s.bg(colors.ghost_element_hover))
-            .active(|s| s.bg(colors.ghost_element_active))
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.toggle_section(SidebarSection::UnstagedChanges, cx);
-            }))
-            .child(
-                rgitui_ui::Icon::new(unstaged_chevron)
-                    .size(rgitui_ui::IconSize::XSmall)
-                    .color(Color::Muted),
-            )
-            .child(
-                Label::new(t!("sidebar.unstaged"))
-                    .size(LabelSize::XSmall)
-                    .weight(gpui::FontWeight::SEMIBOLD)
-                    .color(Color::Muted),
-            )
-            .child(
-                rgitui_ui::Icon::new(IconName::Edit)
-                    .size(rgitui_ui::IconSize::XSmall)
-                    .color(if has_unstaged {
-                        Color::Modified
-                    } else {
-                        Color::Muted
-                    }),
-            );
-
-        if has_unstaged {
-            let kind_order = [
-                FileChangeKind::Added,
-                FileChangeKind::Modified,
-                FileChangeKind::Deleted,
-                FileChangeKind::Renamed,
-                FileChangeKind::Copied,
-                FileChangeKind::TypeChange,
-                FileChangeKind::Untracked,
-                FileChangeKind::UntrackedDirectory,
-                FileChangeKind::Conflicted,
-            ];
-            let mut breakdown = div().h_flex().gap(px(4.));
-            for kind in &kind_order {
-                if let Some(&count) = unstaged_kind_counts.get(kind) {
-                    if count > 0 {
-                        if *kind == FileChangeKind::Untracked {
-                            let hidden = self.unstaged_hidden_kinds.contains(kind);
-                            breakdown = breakdown.child(self.kind_chip(
-                                SidebarSection::UnstagedChanges,
-                                *kind,
-                                count,
-                                hidden,
-                                &colors,
-                                cx,
-                            ));
+            let unstaged_chevron = if unstaged_expanded {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            };
+            let mut unstaged_header = div()
+                .id("section-unstaged")
+                .h_flex()
+                .w_full()
+                .h(px(item_h))
+                .px(px(8.))
+                .gap(px(4.))
+                .items_center()
+                .bg(colors.toolbar_background)
+                .border_b_1()
+                .border_color(colors.border_variant)
+                .when(kb_active, |el| el.border_l_2().border_color(kb_accent))
+                .hover(|s| s.bg(colors.ghost_element_hover))
+                .active(|s| s.bg(colors.ghost_element_active))
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.toggle_section(SidebarSection::UnstagedChanges, cx);
+                }))
+                .child(
+                    rgitui_ui::Icon::new(unstaged_chevron)
+                        .size(rgitui_ui::IconSize::XSmall)
+                        .color(Color::Muted),
+                )
+                .child(
+                    Label::new(t!("sidebar.unstaged"))
+                        .size(LabelSize::XSmall)
+                        .weight(gpui::FontWeight::SEMIBOLD)
+                        .color(Color::Muted),
+                )
+                .child(
+                    rgitui_ui::Icon::new(IconName::Edit)
+                        .size(rgitui_ui::IconSize::XSmall)
+                        .color(if has_unstaged {
+                            Color::Modified
                         } else {
-                            breakdown = breakdown.child(
-                                Label::new(SharedString::from(format!(
-                                    "{}{}",
-                                    Self::file_change_symbol(*kind),
-                                    count
-                                )))
-                                .size(LabelSize::XSmall)
-                                .color(Self::file_change_color(*kind)),
-                            );
+                            Color::Muted
+                        }),
+                );
+
+            if has_unstaged {
+                let kind_order = [
+                    FileChangeKind::Added,
+                    FileChangeKind::Modified,
+                    FileChangeKind::Deleted,
+                    FileChangeKind::Renamed,
+                    FileChangeKind::Copied,
+                    FileChangeKind::TypeChange,
+                    FileChangeKind::Untracked,
+                    FileChangeKind::UntrackedDirectory,
+                    FileChangeKind::Conflicted,
+                ];
+                let mut breakdown = div().h_flex().gap(px(4.));
+                for kind in &kind_order {
+                    if let Some(&count) = unstaged_kind_counts.get(kind) {
+                        if count > 0 {
+                            if *kind == FileChangeKind::Untracked {
+                                let hidden = self.unstaged_hidden_kinds.contains(kind);
+                                breakdown = breakdown.child(self.kind_chip(
+                                    SidebarSection::UnstagedChanges,
+                                    *kind,
+                                    count,
+                                    hidden,
+                                    &colors,
+                                    cx,
+                                ));
+                            } else {
+                                breakdown = breakdown.child(
+                                    Label::new(SharedString::from(format!(
+                                        "{}{}",
+                                        Self::file_change_symbol(*kind),
+                                        count
+                                    )))
+                                    .size(LabelSize::XSmall)
+                                    .color(Self::file_change_color(*kind)),
+                                );
+                            }
                         }
                     }
                 }
+                unstaged_header = unstaged_header.child(breakdown);
             }
-            unstaged_header = unstaged_header.child(breakdown);
-        }
 
-        unstaged_header = unstaged_header
-            .child(div().flex_1())
-            .when(has_unstaged, |el| {
-                el.child(
-                    div().id("stage-all-btn").child(
-                        Button::new("stage-all", t!("sidebar.stage_all"))
-                            .icon(IconName::Plus)
-                            .size(ButtonSize::Compact)
-                            .style(ButtonStyle::Subtle)
-                            .color(Color::Muted)
-                            .on_click(cx.listener(|_this, _: &ClickEvent, _, cx| {
-                                cx.emit(SidebarEvent::StageAll);
-                            })),
-                    ),
-                )
-            })
-            .child(self.render_popover_trigger(
-                SidebarPopover::ChangeListOptions(ChangeList::Unstaged),
-                "unstaged-options",
-                t!("sidebar.unstaged_options.tooltip"),
-                show_line_stats,
-                cx,
-            ))
-            .child(
-                div()
-                    .h_flex()
-                    .h(px(16.))
-                    .min_w(px(20.))
-                    .px(px(6.))
-                    .rounded(px(5.))
-                    .bg(if unstaged_count > 0 {
-                        colors.ghost_element_selected
-                    } else {
-                        colors.ghost_element_hover
-                    })
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        Label::new(SharedString::from(format!("{}", unstaged_count)))
-                            .size(LabelSize::XSmall)
-                            .color(if unstaged_count > 0 {
-                                Color::Modified
-                            } else {
-                                Color::Muted
-                            }),
-                    ),
-            );
-        content = content.child(unstaged_header);
-
-        if unstaged_expanded {
-            if self.unstaged.is_empty() {
-                content = content.child(
+            unstaged_header = unstaged_header
+                .child(div().flex_1())
+                .when(has_unstaged, |el| {
+                    el.child(
+                        div().id("stage-all-btn").child(
+                            Button::new("stage-all", t!("sidebar.stage_all"))
+                                .icon(IconName::Plus)
+                                .size(ButtonSize::Compact)
+                                .style(ButtonStyle::Subtle)
+                                .color(Color::Muted)
+                                .on_click(cx.listener(|_this, _: &ClickEvent, _, cx| {
+                                    cx.emit(SidebarEvent::StageAll);
+                                })),
+                        ),
+                    )
+                })
+                .child(self.render_popover_trigger(
+                    SidebarPopover::ChangeListOptions(ChangeList::Unstaged),
+                    "unstaged-options",
+                    t!("sidebar.unstaged_options.tooltip"),
+                    show_line_stats,
+                    cx,
+                ))
+                .child(
                     div()
                         .h_flex()
-                        .w_full()
-                        .h(px(28.))
-                        .px(px(16.))
+                        .h(px(16.))
+                        .min_w(px(20.))
+                        .px(px(6.))
+                        .rounded(px(5.))
+                        .bg(if unstaged_count > 0 {
+                            colors.ghost_element_selected
+                        } else {
+                            colors.ghost_element_hover
+                        })
                         .items_center()
+                        .justify_center()
                         .child(
-                            Label::new(t!("sidebar.working_clean"))
+                            Label::new(SharedString::from(format!("{}", unstaged_count)))
                                 .size(LabelSize::XSmall)
-                                .color(Color::Placeholder),
+                                .color(if unstaged_count > 0 {
+                                    Color::Modified
+                                } else {
+                                    Color::Muted
+                                }),
                         ),
                 );
-            } else {
-                let nav_base = unstaged_nav_base;
-                let flattened = self.flattened_unstaged.clone();
-                let list_height = list_heights.unstaged;
-                let files = self.unstaged.clone();
-                let selected_file = self.selected_file.clone();
-                let w = sidebar_weak.clone();
-                let colors = colors.clone();
-                let list = uniform_list(
+            content = content.child(unstaged_header);
+
+            if unstaged_expanded {
+                if self.unstaged.is_empty() {
+                    content = content.child(
+                        div()
+                            .h_flex()
+                            .w_full()
+                            .h(px(28.))
+                            .px(px(16.))
+                            .items_center()
+                            .child(
+                                Label::new(t!("sidebar.working_clean"))
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Placeholder),
+                            ),
+                    );
+                } else {
+                    let nav_base = unstaged_nav_base;
+                    let flattened = self.flattened_unstaged.clone();
+                    let list_height = list_heights.unstaged;
+                    let files = self.unstaged.clone();
+                    let selected_file = self.selected_file.clone();
+                    let w = sidebar_weak.clone();
+                    let colors = colors.clone();
+                    let list = uniform_list(
                     "unstaged-file-list",
                     flattened.len(),
                     move |range: Range<usize>, _window: &mut Window, cx: &mut App| {
@@ -4510,10 +4907,9 @@ impl Render for Sidebar {
                 .h(px(list_height))
                 .with_sizing_behavior(ListSizingBehavior::Auto)
                 .track_scroll(&self.unstaged_scroll);
-                content = content.child(list);
+                    content = content.child(list);
+                }
             }
-        }
-
         } // end of optional staged/unstaged file trees
 
         // Build scroll div and context menu (if open), then return panel.
@@ -4526,6 +4922,54 @@ impl Render for Sidebar {
             .child(content);
 
         let mut panel = panel.child(scroll_div);
+
+        if let Some(menu_state) = self.local_branch_context_menu.as_ref() {
+            let branch_name = menu_state.name.clone();
+            let pos = menu_state.position;
+            let weak = cx.weak_entity();
+            let action = |id: &'static str, label: SharedString, event: SidebarEvent, weak: WeakEntity<Sidebar>| {
+                div()
+                    .id(id)
+                    .h_flex()
+                    .w(px(220.))
+                    .h(px(28.))
+                    .px(px(9.))
+                    .items_center()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(colors.ghost_element_hover))
+                    .on_click(move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                        weak.update(cx, |sidebar, cx| {
+                            sidebar.dismiss_local_branch_context_menu(cx);
+                            cx.emit(event.clone());
+                        }).ok();
+                    })
+                    .child(Label::new(label).size(LabelSize::XSmall).color(Color::Default))
+            };
+            let mut menu = div()
+                .id("local-branch-context-menu")
+                .absolute()
+                .left(pos.x - self.container_bounds.origin.x)
+                .top(pos.y - self.container_bounds.origin.y)
+                .v_flex()
+                .p(px(3.))
+                .bg(colors.elevated_surface_background)
+                .border_1()
+                .border_color(colors.border)
+                .rounded(px(4.))
+                .elevation_3(cx)
+                .on_mouse_down_out(cx.listener(|sidebar, _: &MouseDownEvent, _, cx| {
+                    sidebar.dismiss_local_branch_context_menu(cx)
+                }));
+            menu = menu.child(action("local-checkout", t!("sidebar.local_branch.checkout"), SidebarEvent::BranchCheckout(branch_name.clone()), weak.clone()));
+            menu = menu.child(action("local-worktree", t!("sidebar.local_branch.checkout_worktree"), SidebarEvent::WorktreeCreateForBranch(branch_name.clone()), weak.clone()));
+            menu = menu.child(action("local-merge", t!("sidebar.local_branch.merge"), SidebarEvent::MergeBranch(branch_name.clone()), weak.clone()));
+            menu = menu.child(action("local-new-branch", t!("sidebar.local_branch.new_branch"), SidebarEvent::BranchCreateFrom(branch_name.clone()), weak.clone()));
+            menu = menu.child(action("local-new-tag", t!("sidebar.local_branch.new_tag"), SidebarEvent::TagCreateFrom(branch_name.clone()), weak.clone()));
+            menu = menu.child(action("local-rename", t!("sidebar.rename_branch.tooltip"), SidebarEvent::BranchRename(branch_name.clone()), weak.clone()));
+            menu = menu.child(action("local-delete", t!("sidebar.local_branch.delete"), SidebarEvent::BranchDelete(branch_name.clone()), weak.clone()));
+            menu = menu.child(action("local-copy", t!("sidebar.local_branch.copy_name"), SidebarEvent::BranchCopyName(branch_name), weak));
+            panel = panel.child(menu);
+        }
 
         if let Some(ref menu_state) = self.stash_context_menu {
             let menu_bg = colors.elevated_surface_background;
@@ -4756,6 +5200,154 @@ impl Render for Sidebar {
             panel = panel.child(menu);
         }
 
+        if let Some(menu_state) = self.submodule_context_menu.as_ref() {
+            if let Some(submodule) = self.submodules.get(menu_state.index) {
+                let name = submodule.name.clone();
+                let path = submodule.path.display().to_string();
+                let url = submodule.url.clone();
+                let pos = menu_state.position;
+                let menu_id = menu_state.index as u64;
+                let weak = cx.weak_entity();
+                let action = |id: &'static str,
+                              label: SharedString,
+                              event: SidebarEvent,
+                              weak: WeakEntity<Sidebar>| {
+                    div()
+                        .id(ElementId::NamedInteger(id.into(), menu_id))
+                        .h_flex()
+                        .w(px(190.))
+                        .h(px(28.))
+                        .px(px(9.))
+                        .items_center()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(colors.ghost_element_hover))
+                        .on_click(move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                            weak.update(cx, |sidebar, cx| {
+                                sidebar.dismiss_submodule_context_menu(cx);
+                                cx.emit(event.clone());
+                            })
+                            .ok();
+                        })
+                        .child(
+                            Label::new(label)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Default),
+                        )
+                };
+                let mut menu = div()
+                    .id("submodule-context-menu")
+                    .absolute()
+                    .left(pos.x - self.container_bounds.origin.x)
+                    .top(pos.y - self.container_bounds.origin.y)
+                    .v_flex()
+                    .p(px(3.))
+                    .bg(colors.elevated_surface_background)
+                    .border_1()
+                    .border_color(colors.border)
+                    .rounded(px(4.))
+                    .elevation_3(cx)
+                    .on_mouse_down_out(cx.listener(|sidebar, _: &MouseDownEvent, _, cx| {
+                        sidebar.dismiss_submodule_context_menu(cx)
+                    }));
+                menu = menu.child(action(
+                    "submodule-menu-open",
+                    "打开子模块".into(),
+                    SidebarEvent::OpenSubmodule(path.clone()),
+                    weak.clone(),
+                ));
+                menu = menu.child(action(
+                    "submodule-menu-remove",
+                    "删除子模块".into(),
+                    SidebarEvent::RemoveSubmodule(path.clone()),
+                    weak.clone(),
+                ));
+                menu = menu.child(action(
+                    "submodule-menu-url",
+                    "更改源地址…".into(),
+                    SidebarEvent::ChangeSubmoduleUrl { name, path, url },
+                    weak,
+                ));
+                panel = panel.child(menu);
+            }
+        }
+
+        if let Some(menu_state) = self.remote_branch_context_menu.as_ref() {
+            if let Some(branch) = self.remote_branches.get(menu_state.index) {
+                let branch_name = branch.name.clone();
+                let pos = menu_state.position;
+                let menu_id = menu_state.index as u64;
+                let weak = cx.weak_entity();
+                let action = |id: &'static str,
+                              label: SharedString,
+                              event: SidebarEvent,
+                              weak: WeakEntity<Sidebar>| {
+                    div()
+                        .id(ElementId::NamedInteger(id.into(), menu_id))
+                        .h_flex()
+                        .w(px(220.))
+                        .h(px(28.))
+                        .px(px(9.))
+                        .items_center()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(colors.ghost_element_hover))
+                        .on_click(move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                            weak.update(cx, |sidebar, cx| {
+                                sidebar.dismiss_remote_branch_context_menu(cx);
+                                cx.emit(event.clone());
+                            })
+                            .ok();
+                        })
+                        .child(Label::new(label).size(LabelSize::XSmall).color(Color::Default))
+                };
+                let mut menu = div()
+                    .id("remote-branch-context-menu")
+                    .absolute()
+                    .left(pos.x - self.container_bounds.origin.x)
+                    .top(pos.y - self.container_bounds.origin.y)
+                    .v_flex()
+                    .p(px(3.))
+                    .bg(colors.elevated_surface_background)
+                    .border_1()
+                    .border_color(colors.border)
+                    .rounded(px(4.))
+                    .elevation_3(cx)
+                    .on_mouse_down_out(cx.listener(|sidebar, _: &MouseDownEvent, _, cx| {
+                        sidebar.dismiss_remote_branch_context_menu(cx)
+                    }));
+                menu = menu.child(action(
+                    "remote-branch-menu-checkout",
+                    t!("sidebar.remote_branch.checkout"),
+                    SidebarEvent::BranchCheckout(branch_name.clone()),
+                    weak.clone(),
+                ));
+                menu = menu.child(action(
+                    "remote-branch-menu-pull",
+                    t!("sidebar.remote_branch.pull"),
+                    SidebarEvent::RemoteBranchPull(branch_name.clone()),
+                    weak.clone(),
+                ));
+                menu = menu.child(action(
+                    "remote-branch-menu-compare",
+                    t!("sidebar.remote_branch.compare"),
+                    SidebarEvent::RemoteBranchCompare(branch_name.clone()),
+                    weak.clone(),
+                ));
+                menu = menu.child(action(
+                    "remote-branch-menu-delete",
+                    t!("sidebar.remote_branch.delete"),
+                    SidebarEvent::RemoteBranchDelete(branch_name.clone()),
+                    weak.clone(),
+                ));
+                menu = menu.child(action(
+                    "remote-branch-menu-pr",
+                    t!("sidebar.remote_branch.create_pr"),
+                    SidebarEvent::RemoteBranchCreatePr(branch_name),
+                    weak,
+                ));
+                panel = panel.child(menu);
+            }
+        }
+
         panel
     }
 }
@@ -4975,7 +5567,10 @@ mod tests {
         assert_eq!(Sidebar::file_change_symbol(FileChangeKind::Copied), "C");
         assert_eq!(Sidebar::file_change_symbol(FileChangeKind::TypeChange), "T");
         assert_eq!(Sidebar::file_change_symbol(FileChangeKind::Untracked), "?");
-        assert_eq!(Sidebar::file_change_symbol(FileChangeKind::UntrackedDirectory), "▸");
+        assert_eq!(
+            Sidebar::file_change_symbol(FileChangeKind::UntrackedDirectory),
+            "▸"
+        );
         assert_eq!(Sidebar::file_change_symbol(FileChangeKind::Conflicted), "!");
     }
 

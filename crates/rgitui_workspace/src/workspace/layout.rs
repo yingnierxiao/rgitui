@@ -294,6 +294,8 @@ impl Render for Workspace {
                 .child(self.overlays.command_palette.clone())
                 .child(self.overlays.interactive_rebase.clone())
                 .child(self.overlays.theme_editor.clone())
+                .child(self.dialogs.add_submodule_dialog.clone())
+                .child(self.dialogs.remote_dialog.clone())
                 .child(self.dialogs.branch_dialog.clone())
                 .child(self.dialogs.tag_dialog.clone())
                 .child(self.dialogs.worktree_dialog.clone())
@@ -1555,6 +1557,9 @@ impl Render for Workspace {
             .child(self.overlays.command_palette.clone())
             // Interactive rebase dialog overlay
             .child(self.overlays.interactive_rebase.clone())
+            // Add or edit a submodule source
+            .child(self.dialogs.add_submodule_dialog.clone())
+            .child(self.dialogs.remote_dialog.clone())
             // Branch dialog overlay
             .child(self.dialogs.branch_dialog.clone())
             // Tag dialog overlay

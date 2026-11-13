@@ -10,10 +10,74 @@ use rgitui_settings::current_git_auth_runtime;
 
 use crate::types::*;
 
-use super::auth::inject_https_credentials;
+use super::argsafe::{validate_branch_name, validate_remote_name};
+use super::auth::{inject_https_credentials, run_git_network_command};
 use super::refresh::{gather_refresh_data, gather_refresh_data_lightweight_cached};
 use super::worktree_patch::{clean_worktree_bytes, smudge_canonical_bytes};
 use super::{ensure_clean_worktree, head_branch_name, GitProject, GitProjectEvent, RefreshData};
+
+fn validate_remote_url(url: &str) -> Result<()> {
+    if url.trim().is_empty() || url.chars().any(char::is_control) {
+        anyhow::bail!("Remote URL cannot be empty or contain control characters");
+    }
+    Ok(())
+}
+
+fn add_remote_to_repo(repo: &Repository, name: &str, url: &str, is_default: bool) -> Result<()> {
+    validate_remote_name(name)?;
+    validate_remote_url(url)?;
+    if repo.find_remote(name).is_ok() {
+        anyhow::bail!("Remote '{}' already exists", name);
+    }
+    repo.remote(name, url)?;
+    if is_default {
+        repo.config()?.set_str("remote.pushDefault", name)?;
+    }
+    Ok(())
+}
+
+fn update_remote_in_repo(
+    repo: &Repository,
+    old_name: &str,
+    name: &str,
+    url: &str,
+    is_default: bool,
+) -> Result<()> {
+    validate_remote_name(old_name)?;
+    validate_remote_name(name)?;
+    validate_remote_url(url)?;
+    repo.find_remote(old_name)?;
+    if old_name != name && repo.find_remote(name).is_ok() {
+        anyhow::bail!("Remote '{}' already exists", name);
+    }
+    if old_name != name {
+        repo.remote_rename(old_name, name)?;
+    }
+    repo.find_remote(name)?;
+    repo.remote_set_url(name, url)?;
+    let mut config = repo.config()?;
+    let current_default = config.get_string("remote.pushDefault").ok();
+    if is_default {
+        config.set_str("remote.pushDefault", name)?;
+    } else if current_default.as_deref() == Some(old_name)
+        || current_default.as_deref() == Some(name)
+    {
+        config.remove("remote.pushDefault")?;
+    }
+    Ok(())
+}
+
+fn remove_remote_from_repo(repo: &Repository, name: &str) -> Result<()> {
+    repo.remote_delete(name)?;
+    let mut config = repo.config()?;
+    if config
+        .get_string("remote.pushDefault")
+        .is_ok_and(|default_remote| default_remote == name)
+    {
+        config.remove("remote.pushDefault")?;
+    }
+    Ok(())
+}
 
 // TODO(audit): deferred audit items for this module (tracked, not yet applied):
 //  - QUAL-02: the ~39 copy-pasted begin/spawn/apply/complete blocks should collapse
@@ -478,6 +542,111 @@ fn checkout_tree_safe(
 }
 
 impl GitProject {
+    /// Add a named remote and refresh the in-memory repository snapshot.
+    pub fn add_remote(
+        &mut self,
+        name: &str,
+        url: &str,
+        is_default: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let name = name.to_string();
+        let url = url.to_string();
+        let repo_path = self.repo_path.clone();
+        let commit_limit = self.commit_limit;
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let repo = Repository::open(&repo_path)?;
+                    add_remote_to_repo(&repo, &name, &url, is_default)?;
+                    gather_refresh_data(&repo_path, commit_limit)
+                })
+                .await;
+            cx.update(|cx| {
+                this.update(cx, |this, cx| {
+                    let data = result?;
+                    this.apply_refresh_data(data);
+                    cx.emit(GitProjectEvent::RefsChanged);
+                    cx.notify();
+                    Ok(())
+                })?
+            })
+        })
+    }
+
+    /// Rename or update a remote and refresh the in-memory repository snapshot.
+    pub fn update_remote(
+        &mut self,
+        old_name: &str,
+        name: &str,
+        url: &str,
+        is_default: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let old_name = old_name.to_string();
+        let name = name.to_string();
+        let url = url.to_string();
+        let repo_path = self.repo_path.clone();
+        let commit_limit = self.commit_limit;
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let repo = Repository::open(&repo_path)?;
+                    update_remote_in_repo(&repo, &old_name, &name, &url, is_default)?;
+                    gather_refresh_data(&repo_path, commit_limit)
+                })
+                .await;
+            cx.update(|cx| {
+                this.update(cx, |this, cx| {
+                    let data = result?;
+                    this.apply_refresh_data(data);
+                    cx.emit(GitProjectEvent::RefsChanged);
+                    cx.notify();
+                    Ok(())
+                })?
+            })
+        })
+    }
+
+    /// Delete a branch from the remote and prune its local tracking ref.
+    pub fn delete_remote_branch(
+        &mut self,
+        remote_branch: &str,
+        worktree_path: &Path,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let remote_branch = remote_branch.to_string();
+        let worktree_path = worktree_path.to_path_buf();
+        let repo_path = self.repo_path.clone();
+        let commit_limit = self.commit_limit;
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let (remote, branch) = remote_branch
+                        .split_once('/')
+                        .ok_or_else(|| anyhow::anyhow!("Invalid remote branch"))?;
+                    validate_remote_name(remote)?;
+                    validate_branch_name(branch)?;
+                    run_git_network_command(&worktree_path, &["push", remote, "--delete", branch])?;
+                    run_git_network_command(&worktree_path, &["fetch", "--prune", remote])?;
+                    gather_refresh_data(&repo_path, commit_limit)
+                })
+                .await;
+            cx.update(|cx| {
+                this.update(cx, |this, cx| {
+                    let data = result?;
+                    this.apply_refresh_data(data);
+                    cx.emit(GitProjectEvent::RefsChanged);
+                    cx.notify();
+                    Ok(())
+                })?
+            })
+        })
+    }
+
     /// Stage specific files in the given worktree.
     pub fn stage_files_at(
         &mut self,
@@ -3100,7 +3269,7 @@ impl GitProject {
                 .background_executor()
                 .spawn(async move {
                     let repo = Repository::open(&repo_path)?;
-                    repo.remote_delete(&name)?;
+                    remove_remote_from_repo(&repo, &name)?;
                     let data = gather_refresh_data(&repo_path, commit_limit)?;
                     Ok::<_, anyhow::Error>((data, name))
                 })
@@ -5951,9 +6120,13 @@ mod tests {
     use std::path::PathBuf;
     use std::process::Stdio;
 
+    use git2::Repository;
     use rgitui_test_support::TempRepo;
 
-    use super::run_continue_subcommand;
+    use super::{
+        add_remote_to_repo, remove_remote_from_repo, run_continue_subcommand,
+        update_remote_in_repo,
+    };
 
     fn anchored(path: &std::path::Path) -> super::AnchoredWorktreePath {
         super::AnchoredWorktreePath::bind_absolute(path, true).unwrap()
@@ -5968,6 +6141,50 @@ mod tests {
             .env("GIT_EDITOR", "true")
             .output()
             .expect("failed to run git")
+    }
+
+    #[test]
+    fn remote_configuration_add_edit_default_and_remove() {
+        let fixture = TempRepo::init();
+        let repo = Repository::open(fixture.path()).unwrap();
+
+        add_remote_to_repo(&repo, "origin", "https://example.com/old.git", true).unwrap();
+        assert_eq!(
+            repo.find_remote("origin").unwrap().url(),
+            Some("https://example.com/old.git")
+        );
+        assert_eq!(
+            repo.config()
+                .unwrap()
+                .get_string("remote.pushDefault")
+                .unwrap(),
+            "origin"
+        );
+
+        update_remote_in_repo(
+            &repo,
+            "origin",
+            "upstream",
+            "git@example.com:team/new.git",
+            true,
+        )
+        .unwrap();
+        assert!(repo.find_remote("origin").is_err());
+        assert_eq!(
+            repo.find_remote("upstream").unwrap().url(),
+            Some("git@example.com:team/new.git")
+        );
+        assert_eq!(
+            repo.config()
+                .unwrap()
+                .get_string("remote.pushDefault")
+                .unwrap(),
+            "upstream"
+        );
+
+        remove_remote_from_repo(&repo, "upstream").unwrap();
+        assert!(repo.find_remote("upstream").is_err());
+        assert!(repo.config().unwrap().get_string("remote.pushDefault").is_err());
     }
 
     fn install_gitlink_conflict(

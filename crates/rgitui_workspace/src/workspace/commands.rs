@@ -1166,6 +1166,7 @@ impl Workspace {
 
         let project = tab.project.clone();
         let submodule_view = tab.submodule_view.clone();
+        let sidebar = tab.sidebar.clone();
         let active_tab_index = self.active_tab;
 
         let task = project.update(cx, |proj, cx| proj.submodules_async(cx));
@@ -1175,7 +1176,10 @@ impl Workspace {
                 Ok(submodules) => {
                     cx.update(|cx| {
                         submodule_view.update(cx, |sv, cx| {
-                            sv.set_submodules(submodules, cx);
+                            sv.set_submodules(submodules.clone(), cx);
+                        });
+                        sidebar.update(cx, |sidebar, cx| {
+                            sidebar.update_submodules(submodules, cx);
                         });
                         let _ = this.update(cx, |workspace, cx| {
                             if let Some(active_tab) = workspace.tabs.get_mut(active_tab_index) {

@@ -20,12 +20,17 @@ pub enum ConfirmAction {
     BranchDelete(String),
     TagDelete(String),
     RemoveRemote(String),
+    RemoteBranchDelete(String),
     ResetHard(String),
     ResetSoft(String),
     ResetMixed(String),
     /// Abort the merge, rebase or other operation the repository is in.
     AbortOperation(RepoState),
     WorktreeRemove(String),
+    SubmoduleRemove {
+        name: String,
+        path: String,
+    },
 }
 
 /// Events emitted by the confirmation dialog.
@@ -96,16 +101,19 @@ impl ConfirmDialog {
         matches!(
             &self.action,
             Some(
-                ConfirmAction::DiscardFile(_) | ConfirmAction::DiscardFiles(_)
+                ConfirmAction::DiscardFile(_)
+                    | ConfirmAction::DiscardFiles(_)
                     | ConfirmAction::DiscardAll
                     | ConfirmAction::CleanUntracked
                     | ConfirmAction::BranchDelete(_)
                     | ConfirmAction::TagDelete(_)
                     | ConfirmAction::RemoveRemote(_)
+                    | ConfirmAction::RemoteBranchDelete(_)
                     | ConfirmAction::StashDrop(_)
                     | ConfirmAction::ResetHard(_)
                     | ConfirmAction::AbortOperation(_)
                     | ConfirmAction::WorktreeRemove(_)
+                    | ConfirmAction::SubmoduleRemove { .. }
             )
         )
     }
@@ -129,13 +137,18 @@ impl ConfirmDialog {
     /// The confirm button's label for `action`, in the active language.
     fn confirm_label(action: &Option<ConfirmAction>) -> SharedString {
         match action {
-            Some(ConfirmAction::DiscardFile(_) | ConfirmAction::DiscardFiles(_) | ConfirmAction::DiscardAll) => {
+            Some(
+                ConfirmAction::DiscardFile(_)
+                | ConfirmAction::DiscardFiles(_)
+                | ConfirmAction::DiscardAll,
+            ) => {
                 t!("confirm.discard")
             }
             Some(ConfirmAction::CleanUntracked) => t!("confirm.clean"),
             Some(ConfirmAction::BranchDelete(_)) => t!("confirm.delete_branch"),
             Some(ConfirmAction::TagDelete(_)) => t!("confirm.delete_tag"),
             Some(ConfirmAction::RemoveRemote(_)) => t!("confirm.remove"),
+            Some(ConfirmAction::RemoteBranchDelete(_)) => t!("confirm.title.delete_remote_branch"),
             Some(ConfirmAction::StashDrop(_)) => t!("confirm.drop_stash"),
             Some(ConfirmAction::ResetHard(_)) => t!("confirm.reset"),
             Some(ConfirmAction::ResetSoft(_)) => t!("confirm.reset"),
@@ -143,6 +156,7 @@ impl ConfirmDialog {
             Some(ConfirmAction::AbortOperation(_)) => t!("common.abort"),
             Some(ConfirmAction::ForcePush) => t!("confirm.force_push"),
             Some(ConfirmAction::WorktreeRemove(_)) => t!("confirm.remove_worktree"),
+            Some(ConfirmAction::SubmoduleRemove { .. }) => "删除子模块".into(),
             None => t!("confirm.confirm"),
         }
     }
@@ -201,6 +215,10 @@ impl ConfirmDialog {
                 t!("confirm.title.remove_remote"),
                 t!("confirm.body.remove_remote", remote = name),
             ),
+            ConfirmAction::RemoteBranchDelete(name) => (
+                t!("confirm.title.delete_remote_branch"),
+                t!("confirm.body.delete_remote_branch", branch = name),
+            ),
             ConfirmAction::ResetHard(target) if target == "HEAD" => (
                 t!("confirm.title.reset_hard"),
                 t!("confirm.body.reset_hard_head"),
@@ -221,6 +239,13 @@ impl ConfirmDialog {
             ConfirmAction::WorktreeRemove(path) => (
                 t!("confirm.title.remove_worktree"),
                 t!("confirm.body.remove_worktree", path = path),
+            ),
+            ConfirmAction::SubmoduleRemove { name, path } => (
+                "删除子模块".into(),
+                format!(
+                    "将从仓库移除子模块 {name} ({path})。如果子模块含有本地修改，Git 会拒绝删除。"
+                )
+                .into(),
             ),
         }
     }
@@ -451,7 +476,8 @@ mod tests {
         fn check_destructive(action: &ConfirmAction) -> bool {
             matches!(
                 action,
-                ConfirmAction::DiscardFile(_) | ConfirmAction::DiscardFiles(_)
+                ConfirmAction::DiscardFile(_)
+                    | ConfirmAction::DiscardFiles(_)
                     | ConfirmAction::DiscardAll
                     | ConfirmAction::CleanUntracked
                     | ConfirmAction::BranchDelete(_)
@@ -534,7 +560,8 @@ mod tests {
                 a => {
                     if matches!(
                         a,
-                        ConfirmAction::DiscardFile(_) | ConfirmAction::DiscardFiles(_)
+                        ConfirmAction::DiscardFile(_)
+                            | ConfirmAction::DiscardFiles(_)
                             | ConfirmAction::DiscardAll
                             | ConfirmAction::CleanUntracked
                             | ConfirmAction::BranchDelete(_)

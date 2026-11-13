@@ -10,7 +10,7 @@ use gpui::{
 use rgitui_git::SubmoduleInfo;
 use rgitui_i18n::t;
 use rgitui_theme::{ActiveTheme, Color, StyledExt};
-use rgitui_ui::{Icon, IconName, IconSize, Label, LabelSize, Tooltip};
+use rgitui_ui::{ButtonSize, Icon, IconButton, IconName, IconSize, Label, LabelSize, Tooltip};
 
 use crate::keymap;
 use crate::CommandId;
@@ -183,6 +183,7 @@ impl Render for SubmoduleView {
         let submodules = self.submodules.clone();
         let count = submodules.len();
         let view: WeakEntity<SubmoduleView> = cx.weak_entity();
+        let header_view = view.clone();
 
         let editor_bg = colors.editor_background;
         let border_variant = colors.border_variant;
@@ -343,6 +344,41 @@ impl Render for SubmoduleView {
                                     .overflow_x_hidden()
                                     .child(branch_display),
                             )
+                            .child(if !sub.is_initialized {
+                                let name = sub.name.clone();
+                                let view = view.clone();
+                                IconButton::new(
+                                    ElementId::NamedInteger("submodule-init".into(), i as u64),
+                                    IconName::Plus,
+                                )
+                                .size(ButtonSize::Compact)
+                                .color(Color::Accent)
+                                .tooltip("初始化子模块")
+                                .on_click(move |_, _, cx| {
+                                    view.update(cx, |_, cx| {
+                                        cx.emit(SubmoduleViewEvent::InitSubmodule(name.clone()))
+                                    })
+                                    .ok();
+                                })
+                                .into_any_element()
+                            } else {
+                                let name = sub.name.clone();
+                                let view = view.clone();
+                                IconButton::new(
+                                    ElementId::NamedInteger("submodule-update".into(), i as u64),
+                                    IconName::Refresh,
+                                )
+                                .size(ButtonSize::Compact)
+                                .color(Color::Muted)
+                                .tooltip("更新子模块")
+                                .on_click(move |_, _, cx| {
+                                    view.update(cx, |_, cx| {
+                                        cx.emit(SubmoduleViewEvent::UpdateSubmodule(name.clone()))
+                                    })
+                                    .ok();
+                                })
+                                .into_any_element()
+                            })
                             .into_any_element()
                     })
                     .collect()
@@ -394,7 +430,18 @@ impl Render for SubmoduleView {
                         Label::new(SharedString::from(format!("{} submodules", count)))
                             .size(LabelSize::XSmall)
                             .color(Color::Placeholder),
-                    ),
+                    )
+                    .child({
+                        let view = header_view.clone();
+                        IconButton::new("submodules-update-all", IconName::Refresh)
+                            .size(ButtonSize::Compact)
+                            .color(Color::Muted)
+                            .tooltip("更新全部子模块")
+                            .on_click(move |_, _, cx| {
+                                view.update(cx, |_, cx| cx.emit(SubmoduleViewEvent::UpdateAll))
+                                    .ok();
+                            })
+                    }),
             )
             .child(list)
             .into_any_element()

@@ -625,6 +625,15 @@ pub fn compute_commit_diff(repo_path: &Path, oid: git2::Oid) -> Result<CommitDif
     result
 }
 
+/// Compute the file diff between two branch or revision names.
+pub fn compute_compare_diff(repo_path: &Path, from: &str, to: &str) -> Result<CommitDiff> {
+    let repo = Repository::open(repo_path)?;
+    let from_tree = repo.revparse_single(from)?.peel_to_tree()?;
+    let to_tree = repo.revparse_single(to)?.peel_to_tree()?;
+    let diff = repo.diff_tree_to_tree(Some(&from_tree), Some(&to_tree), None)?;
+    parse_multi_file_diff(&diff)
+}
+
 pub fn compute_stash_diff(repo_path: &Path, index: usize) -> Result<CommitDiff> {
     let mut repo = Repository::open(repo_path)?;
     let mut stash_oid: Option<git2::Oid> = None;
@@ -2072,6 +2081,25 @@ mod diff_integration_tests {
         // Root commit: diff against empty tree → f.txt is added
         assert_eq!(diff.files.len(), 1);
         assert!(matches!(diff.files[0].kind, FileChangeKind::Added));
+    }
+
+    #[test]
+    fn compare_diff_uses_two_revision_trees() {
+        let fixture = make_two_commit_repo();
+        let first = fixture
+            .repo()
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .parent(0)
+            .unwrap()
+            .id();
+        let diff = compute_compare_diff(fixture.path(), &first.to_string(), "HEAD").unwrap();
+        assert_eq!(diff.files.len(), 1);
+        assert_eq!(diff.files[0].path, Path::new("hello.txt"));
+        assert_eq!(diff.total_additions, 1);
+        assert_eq!(diff.total_deletions, 1);
     }
 
     // ── compute_file_diff (unstaged) ─────────────────────────────

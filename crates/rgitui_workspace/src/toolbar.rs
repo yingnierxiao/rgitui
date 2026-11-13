@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use gpui::prelude::*;
 use gpui::SharedString;
 use gpui::{div, px, ClickEvent, Context, EventEmitter, Render, Window};
@@ -51,6 +53,8 @@ pub struct Toolbar {
     is_fetching: bool,
     is_pulling: bool,
     is_pushing: bool,
+    network_operation_id: Option<u64>,
+    network_operation_started_at: Option<Instant>,
     has_github_token: bool,
     ahead: usize,
     behind: usize,
@@ -74,6 +78,8 @@ impl Toolbar {
             is_fetching: false,
             is_pulling: false,
             is_pushing: false,
+            network_operation_id: None,
+            network_operation_started_at: None,
             has_github_token: false,
             ahead: 0,
             behind: 0,
@@ -136,6 +142,64 @@ impl Toolbar {
         }
         self.is_pushing = pushing;
         cx.notify();
+    }
+
+    /// 跟踪当前网络操作，并让工具栏按秒更新耗时。
+    pub fn set_network_operation(
+        &mut self,
+        operation_id: u64,
+        running: bool,
+        started_at: Option<Instant>,
+        cx: &mut Context<Self>,
+    ) {
+        if running {
+            if self.network_operation_id == Some(operation_id)
+                && self.network_operation_started_at == started_at
+            {
+                return;
+            }
+            self.network_operation_id = Some(operation_id);
+            self.network_operation_started_at = started_at;
+            cx.spawn(async move |this, cx: &mut gpui::AsyncApp| loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                let keep_running = this
+                    .update(cx, |toolbar, cx| {
+                        if toolbar.network_operation_id == Some(operation_id)
+                            && toolbar.network_operation_started_at.is_some()
+                        {
+                            cx.notify();
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                if !keep_running {
+                    break;
+                }
+            })
+            .detach();
+        } else if self.network_operation_id == Some(operation_id) {
+            self.network_operation_id = None;
+            self.network_operation_started_at = None;
+        } else {
+            return;
+        }
+        cx.notify();
+    }
+
+    fn operation_label(&self, label: SharedString) -> SharedString {
+        let Some(started_at) = self.network_operation_started_at else {
+            return label;
+        };
+        let elapsed = started_at.elapsed().as_secs();
+        if elapsed < 2 {
+            label
+        } else {
+            SharedString::from(format!("{} ({}s)", label, elapsed))
+        }
     }
 
     fn build_tooltip(tooltip_text: SharedString, command: Option<CommandId>) -> TooltipFactory {
@@ -207,17 +271,17 @@ impl Toolbar {
 
     fn render_left_group(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let fetch_label = if self.is_fetching {
-            t!("toolbar.fetching")
+            self.operation_label(t!("toolbar.fetching"))
         } else {
             t!("toolbar.fetch")
         };
         let pull_label = if self.is_pulling {
-            t!("toolbar.pulling")
+            self.operation_label(t!("toolbar.pulling"))
         } else {
             t!("toolbar.pull")
         };
         let push_label = if self.is_pushing {
-            t!("toolbar.pushing")
+            self.operation_label(t!("toolbar.pushing"))
         } else {
             t!("toolbar.push")
         };

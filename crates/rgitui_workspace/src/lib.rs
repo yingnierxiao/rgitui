@@ -1,3 +1,4 @@
+mod add_submodule_dialog;
 pub(crate) mod avatar_resolver;
 mod bisect_view;
 mod blame_view;
@@ -25,6 +26,7 @@ mod prs_panel;
 mod reflog_view;
 mod rename_dialog;
 mod repo_clone_dialog;
+mod remote_dialog;
 mod repo_opener;
 mod search_panel;
 mod settings_window;
@@ -45,6 +47,7 @@ mod toolbar;
 mod workspace;
 pub(crate) mod worktree_dialog;
 
+pub use add_submodule_dialog::*;
 pub use bisect_view::*;
 pub use blame_view::*;
 pub use branch_dialog::*;
@@ -68,6 +71,7 @@ pub use prs_panel::*;
 pub use reflog_view::*;
 pub use rename_dialog::*;
 pub use repo_clone_dialog::*;
+pub use remote_dialog::*;
 pub use repo_opener::*;
 pub use search_panel::*;
 pub use settings_window::{

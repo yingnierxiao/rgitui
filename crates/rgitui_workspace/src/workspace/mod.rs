@@ -431,6 +431,8 @@ impl Workspace {
         let theme_editor = cx.new(crate::ThemeEditorDialog::new_for_active_theme);
         let toast_layer = cx.new(ToastLayer::new);
 
+        let add_submodule_dialog = cx.new(crate::AddSubmoduleDialog::new);
+        let remote_dialog = cx.new(crate::RemoteDialog::new);
         let branch_dialog = cx.new(crate::BranchDialog::new);
         let tag_dialog = cx.new(crate::TagDialog::new);
         let worktree_dialog = cx.new(crate::WorktreeDialog::new);
@@ -444,6 +446,8 @@ impl Workspace {
         let shortcuts_help = cx.new(crate::ShortcutsHelp::new);
 
         // Set up all event subscriptions
+        events::subscribe_add_submodule_dialog(cx, &add_submodule_dialog);
+        events::subscribe_remote_dialog(cx, &remote_dialog);
         events::subscribe_interactive_rebase(cx, &interactive_rebase);
         events::subscribe_ai(cx, &ai);
         events::subscribe_command_palette(cx, &command_palette);
@@ -490,6 +494,8 @@ impl Workspace {
                 right_panel_bounds: Bounds::default(),
             },
             dialogs: DialogState {
+                add_submodule_dialog,
+                remote_dialog,
                 branch_dialog,
                 tag_dialog,
                 rename_dialog,
@@ -908,13 +914,20 @@ impl Workspace {
     /// Open the GitHub PR creation dialog with the current branch as head
     /// and "main" as the default base.
     pub fn open_create_pr_dialog(&mut self, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.get(self.active_tab) else {
+        if self.tabs.get(self.active_tab).is_none() {
             return;
-        };
+        }
         let head_branch = self
             .active_project()
             .and_then(|p| p.read(cx).head_branch().map(String::from));
         let Some(head) = head_branch else { return };
+        self.open_create_pr_dialog_for(head, cx);
+    }
+
+    pub fn open_create_pr_dialog_for(&mut self, head: String, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
         let token = tab.prs_panel.read(cx).github_token().map(String::from);
         let owner = tab.prs_panel.read(cx).github_owner().to_string();
         let repo = tab.prs_panel.read(cx).github_repo().to_string();
@@ -1165,10 +1178,22 @@ mod tests {
     fn tab_order_includes_the_visible_changes_panel() {
         use FocusedPanel::*;
         assert_eq!(FocusedPanel::cycle(Some(Sidebar), true, false, true), Graph);
-        assert_eq!(FocusedPanel::cycle(Some(Graph), true, false, true), DetailPanel);
-        assert_eq!(FocusedPanel::cycle(Some(DetailPanel), false, false, true), Graph);
-        assert_eq!(FocusedPanel::cycle(Some(Sidebar), false, false, true), ChangesPanel);
-        assert_eq!(FocusedPanel::cycle(Some(DiffViewer), true, false, true), ChangesPanel);
+        assert_eq!(
+            FocusedPanel::cycle(Some(Graph), true, false, true),
+            DetailPanel
+        );
+        assert_eq!(
+            FocusedPanel::cycle(Some(DetailPanel), false, false, true),
+            Graph
+        );
+        assert_eq!(
+            FocusedPanel::cycle(Some(Sidebar), false, false, true),
+            ChangesPanel
+        );
+        assert_eq!(
+            FocusedPanel::cycle(Some(DiffViewer), true, false, true),
+            ChangesPanel
+        );
         assert_eq!(FocusedPanel::cycle(None, true, false, true), Graph);
         assert_eq!(FocusedPanel::cycle(None, false, false, true), Graph);
     }
@@ -1176,8 +1201,14 @@ mod tests {
     #[test]
     fn tab_order_skips_hidden_graph_and_changes_panel() {
         use FocusedPanel::*;
-        assert_eq!(FocusedPanel::cycle(Some(Sidebar), true, true, true), DetailPanel);
-        assert_eq!(FocusedPanel::cycle(Some(DetailPanel), false, true, true), Sidebar);
+        assert_eq!(
+            FocusedPanel::cycle(Some(Sidebar), true, true, true),
+            DetailPanel
+        );
+        assert_eq!(
+            FocusedPanel::cycle(Some(DetailPanel), false, true, true),
+            Sidebar
+        );
 
         let lap = |forward: bool| {
             let mut panel = Sidebar;
@@ -1191,7 +1222,10 @@ mod tests {
         assert_eq!(lap(true), [DetailPanel, DiffViewer, ChangesPanel, Sidebar]);
         assert_eq!(lap(false), [ChangesPanel, DiffViewer, DetailPanel, Sidebar]);
 
-        assert_eq!(FocusedPanel::cycle(Some(DiffViewer), true, false, false), Sidebar);
+        assert_eq!(
+            FocusedPanel::cycle(Some(DiffViewer), true, false, false),
+            Sidebar
+        );
         assert_eq!(
             FocusedPanel::cycle(Some(Sidebar), false, true, false),
             DiffViewer
