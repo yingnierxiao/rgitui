@@ -13,7 +13,7 @@ use rgitui_git::{
     RebaseEntryAction, RebasePlanEntry, Signature,
 };
 use rgitui_graph::{GraphView, GraphViewEvent, WorktreeGraphInfo};
-use rgitui_i18n::{msg, Message};
+use rgitui_i18n::{msg, t, Message};
 
 use crate::{
     cache::LruCache, AddSubmoduleDialog, AddSubmoduleDialogEvent, BisectView, BisectViewEvent,
@@ -986,9 +986,27 @@ pub(super) fn subscribe_confirm_dialog(
                         ConfirmAction::RemoteBranchDelete(name) => {
                             let name = name.clone();
                             let worktree_path = this.effective_worktree_path(cx);
-                            project.update(cx, |proj, cx| {
-                                proj.delete_remote_branch(&name, &worktree_path, cx).detach();
+                            let task = project.update(cx, |proj, cx| {
+                                proj.delete_remote_branch(&name, &worktree_path, cx)
                             });
+                            cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
+                                let result = task.await;
+                                cx.update(|cx| {
+                                    let _ = this.update(cx, |workspace, cx| match result {
+                                        Ok(()) => workspace.show_toast(
+                                            t!("workspace.remote_branch.delete_done", branch = name),
+                                            ToastKind::Success,
+                                            cx,
+                                        ),
+                                        Err(error) => workspace.show_toast(
+                                            t!("workspace.remote_branch.delete_failed", branch = name, error = error.to_string()),
+                                            ToastKind::Error,
+                                            cx,
+                                        ),
+                                    });
+                                });
+                            })
+                            .detach();
                         }
                         ConfirmAction::AbortOperation(_) => {
                             let worktree_path = this.effective_worktree_path(cx);
@@ -2098,12 +2116,17 @@ pub(super) fn subscribe_sidebar(
                                         )
                                     });
                                 } else {
-                                    viewer.update(cx, |viewer, cx| viewer.clear(cx));
+                                    viewer.update(cx, |viewer, cx| {
+                                        viewer.set_error(t!("workspace.remote_branch.no_differences"), cx)
+                                    });
                                 }
                                 detail.update(cx, |detail, cx| detail.clear(cx));
                             }
                             Err(error) => viewer.update(cx, |viewer, cx| {
-                                viewer.set_error(format!("Compare failed: {}", error), cx)
+                                viewer.set_error(
+                                    t!("workspace.remote_branch.compare_failed", error = error.to_string()),
+                                    cx,
+                                )
                             }),
                         }
                     });
