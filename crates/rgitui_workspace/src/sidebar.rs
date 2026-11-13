@@ -1120,6 +1120,22 @@ impl Sidebar {
         cx.notify();
     }
 
+    /// Open the first conflicted file in the three-way resolver.
+    pub fn open_first_conflict(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(file) = self
+            .unstaged
+            .iter()
+            .find(|file| file.kind == FileChangeKind::Conflicted)
+        else {
+            return false;
+        };
+        let path = file.path.display().to_string();
+        self.selected_file = Some((path.clone(), false));
+        cx.emit(SidebarEvent::ConflictFileSelected(path));
+        cx.notify();
+        true
+    }
+
     /// Check if the sidebar is currently focused.
     pub fn is_focused(&self, window: &Window) -> bool {
         self.focus_handle.is_focused(window)

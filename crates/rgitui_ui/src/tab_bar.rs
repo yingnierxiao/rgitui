@@ -83,6 +83,8 @@ impl RenderOnce for Tab {
             .id(self.id.clone())
             .group("tab")
             .h_flex()
+            .flex_1()
+            .min_w_0()
             .h(px(28.))
             .px_2()
             .gap_1()
@@ -111,15 +113,19 @@ impl RenderOnce for Tab {
         }
 
         tab = tab.child(
-            Label::new(self.label)
-                .size(LabelSize::Small)
-                .color(label_color)
-                .truncate(),
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    Label::new(self.label)
+                        .size(LabelSize::Small)
+                        .color(label_color)
+                        .truncate(),
+                ),
         );
 
-        // Close button (visible on hover or when active)
+        // Close button is only exposed while the pointer is over this tab.
         if self.closeable {
-            let is_active = self.active;
             let mut close_btn = IconButton::new(
                 ElementId::Name(format!("{}-close", self.id).into()),
                 IconName::X,
@@ -136,12 +142,11 @@ impl RenderOnce for Tab {
                 });
             }
 
-            // Only show close button on hover or when tab is active
+            // Do not keep an always-visible close target on the active tab.
             tab = tab.child(
                 div()
-                    .when(!is_active, |el| {
-                        el.invisible().group_hover("tab", |s| s.visible())
-                    })
+                    .invisible()
+                    .group_hover("tab", |s| s.visible())
                     .child(close_btn),
             );
         }

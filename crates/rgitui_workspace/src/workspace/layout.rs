@@ -391,6 +391,16 @@ impl Render for Workspace {
             Some(worktree) => project.conflicted_files_at(&worktree.path).len(),
             None => project.conflicted_files().len(),
         };
+        let first_conflict_path = match inspected {
+            Some(worktree) => project
+                .conflicted_files_at(&worktree.path)
+                .first()
+                .map(|file| file.path.display().to_string()),
+            None => project
+                .conflicted_files()
+                .first()
+                .map(|file| file.path.display().to_string()),
+        };
         // Only the main checkout's detached HEAD gets this banner. An inspected
         // worktree's is already named by the inspection banner, and a rebase or
         // bisect detaches HEAD as part of an operation its own banner covers.
@@ -649,10 +659,27 @@ impl Render for Workspace {
                                         .truncate(),
                                 ),
                         )
-                        // Bisect has no continuation — it advances by judging
-                        // the checked-out commit — so it gets no button rather
-                        // than one that can only report why it did nothing.
-                        .when(repo_state.continue_subcommand().is_some(), |el| {
+                        // Resolve opens the first conflicted file in the existing
+                        // three-way editor. Once every file is staged, the same
+                        // slot becomes Continue, matching GitHub Desktop's flow.
+                        .when(has_conflicts, |el| {
+                            el.child(
+                                Button::new("conflict-resolve", t!("workspace.conflict.resolve"))
+                                    .size(ButtonSize::Compact)
+                                    .style(ButtonStyle::Filled)
+                                    .color(Color::Warning)
+                                    .disabled(first_conflict_path.is_none())
+                                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                                        let Some(tab) = this.tabs.get_mut(this.active_tab) else {
+                                            return;
+                                        };
+                                        tab.sidebar.update(cx, |sidebar, cx| {
+                                            sidebar.open_first_conflict(cx);
+                                        });
+                                    })),
+                            )
+                        })
+                        .when(!has_conflicts && repo_state.continue_subcommand().is_some(), |el| {
                             el.child(
                                 Button::new("conflict-continue", t!("workspace.conflict.continue"))
                                     .size(ButtonSize::Compact)

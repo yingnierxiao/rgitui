@@ -827,6 +827,9 @@ impl DetailPanel {
         self.description_expanded = false;
         self.contained_in.clear();
         self.contained_in_loading = false;
+        // Notify the workspace so the initially selected file is loaded too.
+        // Metadata-only history entries intentionally have no hunks yet.
+        self.emit_file_selected(cx);
         cx.notify();
     }
 
@@ -2513,6 +2516,8 @@ mod tests {
             additions: 10,
             deletions: 5,
             kind,
+            size_bytes: 0,
+            is_binary: false,
         }
     }
 

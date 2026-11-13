@@ -5558,6 +5558,8 @@ mod tests {
             additions,
             deletions,
             kind: FileChangeKind::Modified,
+            size_bytes: 0,
+            is_binary: false,
         }
     }
 
@@ -6729,6 +6731,8 @@ mod view_tests {
             additions: 1,
             deletions: 0,
             kind: FileChangeKind::Modified,
+            size_bytes: 0,
+            is_binary: false,
         }
     }
 
@@ -7445,6 +7449,8 @@ mod view_tests {
             additions: 0,
             deletions: 0,
             kind: FileChangeKind::Modified,
+            size_bytes: 0,
+            is_binary: false,
         }
     }
 

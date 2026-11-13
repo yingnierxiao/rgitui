@@ -157,7 +157,9 @@ impl ViewCaches {
         Self {
             blame: std::sync::Arc::new(std::sync::Mutex::new(crate::cache::LruCache::new(24))),
             history: std::sync::Arc::new(std::sync::Mutex::new(crate::cache::LruCache::new(24))),
-            diff: std::sync::Arc::new(std::sync::Mutex::new(crate::cache::LruCache::new(200))),
+            // History entries retain file metadata only; keep the list bounded
+            // so switching among very long histories cannot grow indefinitely.
+            diff: std::sync::Arc::new(std::sync::Mutex::new(crate::cache::LruCache::new(64))),
         }
     }
 

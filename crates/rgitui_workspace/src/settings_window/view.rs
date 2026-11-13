@@ -448,6 +448,7 @@ pub struct SettingsView {
     show_line_numbers_in_diff: bool,
     diff_view_mode: DiffViewMode,
     diff_wrap_lines: bool,
+    diff_file_size_limit_mb: usize,
     graph_style: GraphStyle,
     show_subject_column: bool,
     auto_fetch_interval: AutoFetchInterval,
@@ -1024,6 +1025,7 @@ impl SettingsView {
             show_line_numbers_in_diff: settings.show_line_numbers_in_diff,
             diff_view_mode: settings.diff_view_mode,
             diff_wrap_lines: settings.diff_wrap_lines,
+            diff_file_size_limit_mb: settings.diff_file_size_limit_mb,
             graph_style: settings.graph_style,
             show_subject_column: settings.show_subject_column,
             auto_fetch_interval: settings.auto_fetch_interval,
@@ -1105,6 +1107,7 @@ impl SettingsView {
                 self.show_line_numbers_in_diff = s.show_line_numbers_in_diff;
                 self.diff_view_mode = s.diff_view_mode;
                 self.diff_wrap_lines = s.diff_wrap_lines;
+                self.diff_file_size_limit_mb = s.diff_file_size_limit_mb;
                 self.graph_style = s.graph_style;
                 self.show_subject_column = s.show_subject_column;
                 self.auto_fetch_interval = s.auto_fetch_interval;
@@ -1367,6 +1370,7 @@ impl SettingsView {
             state.settings_mut().show_line_numbers_in_diff = self.show_line_numbers_in_diff;
             state.settings_mut().diff_view_mode = self.diff_view_mode;
             state.settings_mut().diff_wrap_lines = self.diff_wrap_lines;
+            state.settings_mut().diff_file_size_limit_mb = self.diff_file_size_limit_mb;
             state.settings_mut().graph_style = self.graph_style;
             state.settings_mut().show_subject_column = self.show_subject_column;
             state.settings_mut().auto_fetch_interval = self.auto_fetch_interval;
@@ -3668,6 +3672,7 @@ impl SettingsView {
         let mut diff_card = Self::setting_card(cx);
         let show_line_numbers = self.show_line_numbers_in_diff;
         let wrap_lines = self.diff_wrap_lines;
+        let diff_file_size_limit_mb = self.diff_file_size_limit_mb;
         diff_card = diff_card
             .child(
                 div()
@@ -3706,6 +3711,75 @@ impl SettingsView {
                                     CheckState::Unchecked
                                 },
                             )),
+                    ),
+            )
+            .child(
+                div()
+                    .h_flex()
+                    .w_full()
+                    .items_center()
+                    .child(
+                        div()
+                            .v_flex()
+                            .flex_1()
+                            .gap(px(2.))
+                            .child(
+                                Label::new(t!("settings.diff_file_size.title"))
+                                    .size(LabelSize::Small)
+                                    .weight(FontWeight::SEMIBOLD),
+                            )
+                            .child(
+                                Label::new(t!("settings.diff_file_size.description"))
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .h_flex()
+                            .gap(px(4.))
+                            .items_center()
+                            .child(
+                                Button::new("diff-file-size-dec", "-")
+                                    .style(ButtonStyle::Outlined)
+                                    .size(ButtonSize::Compact)
+                                    .disabled(diff_file_size_limit_mb <= 1)
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        if this.diff_file_size_limit_mb > 1 {
+                                            this.diff_file_size_limit_mb -= 1;
+                                            this.save_settings(cx);
+                                        }
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .w(px(52.))
+                                    .h(px(28.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .bg(colors.editor_background)
+                                    .border_1()
+                                    .border_color(colors.border)
+                                    .rounded(px(6.))
+                                    .child(
+                                        Label::new(format!("{} MB", diff_file_size_limit_mb))
+                                            .size(LabelSize::Small)
+                                            .weight(FontWeight::SEMIBOLD),
+                                    ),
+                            )
+                            .child(
+                                Button::new("diff-file-size-inc", "+")
+                                    .style(ButtonStyle::Outlined)
+                                    .size(ButtonSize::Compact)
+                                    .disabled(diff_file_size_limit_mb >= 100)
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        if this.diff_file_size_limit_mb < 100 {
+                                            this.diff_file_size_limit_mb += 1;
+                                            this.save_settings(cx);
+                                        }
+                                    })),
+                            ),
                     ),
             )
             .child(

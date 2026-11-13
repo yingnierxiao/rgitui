@@ -1259,8 +1259,6 @@ pub(super) struct ProjectSubscriptions<'a> {
     pub diff_viewer: &'a Entity<DiffViewer>,
     pub detail_panel: &'a Entity<DetailPanel>,
     pub toolbar: &'a Entity<Toolbar>,
-    pub diff_cache: Arc<Mutex<CommitDiffCache>>,
-    pub diff_prefetch: DiffPrefetchScheduler,
 }
 
 pub(super) fn subscribe_project(cx: &mut Context<Workspace>, subs: ProjectSubscriptions) {
@@ -1270,9 +1268,6 @@ pub(super) fn subscribe_project(cx: &mut Context<Workspace>, subs: ProjectSubscr
     let toolbar = subs.toolbar.clone();
     let diff_viewer = subs.diff_viewer.clone();
     let detail_panel_ref = subs.detail_panel.clone();
-    let diff_cache = subs.diff_cache;
-    let diff_prefetch = subs.diff_prefetch;
-    let has_prewarmed = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     cx.subscribe(project, {
         move |this, project, event: &GitProjectEvent, cx| match event {
@@ -1559,26 +1554,6 @@ pub(super) fn subscribe_project(cx: &mut Context<Workspace>, subs: ProjectSubscr
                     .detach();
                 }
 
-                // Pre-warm diff cache once for the first 30 commits.
-                if has_prewarmed.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                    // Already prewarmed — skip on subsequent StatusChanged events
-                } else {
-                    let proj = project.read(cx);
-                    let prewarm_oids: Vec<git2::Oid> = {
-                        let cached = diff_cache.lock().unwrap();
-                        proj.recent_commits()
-                            .iter()
-                            .take(30)
-                            .map(|c| c.oid)
-                            .filter(|oid| !cached.contains(oid))
-                            .collect()
-                    };
-                    if !prewarm_oids.is_empty() {
-                        let repo_path = proj.repo_path().to_path_buf();
-                        log::debug!("diff_prewarm: starting for {} commits", prewarm_oids.len());
-                        diff_prefetch.enqueue(repo_path, prewarm_oids, cx);
-                    }
-                } // end prewarm gate
 
                 // Delay expensive line counts until the file list is already
                 // interactive. The first pass targets files currently shown by
@@ -2451,12 +2426,14 @@ type CommitDiffCache = LruCache<git2::Oid, Arc<rgitui_git::CommitDiff>>;
 /// diff the user is actually looking at, which is spawned on the same
 /// executor; at four wide on a four-core machine the interactive diff waited
 /// behind four stale prefetches, each measured at 25.6ms p95.
+#[allow(dead_code)]
 fn diff_prefetch_concurrency() -> usize {
     std::thread::available_parallelism()
         .map(|cores| cores.get().saturating_sub(2).max(1))
         .unwrap_or(1)
 }
 
+#[allow(dead_code)]
 const DIFF_PREFETCH_BATCH_SIZE: usize = 32;
 
 /// Hard ceiling on queued speculative diffs.
@@ -2465,9 +2442,11 @@ const DIFF_PREFETCH_BATCH_SIZE: usize = 32;
 /// offers tens of thousands. Deduplication alone does not bound that — it only
 /// stops the same commit being queued twice — and an unbounded queue drained
 /// oldest-first spends its time on neighbourhoods the cursor left long ago.
+#[allow(dead_code)]
 const DIFF_PREFETCH_MAX_PENDING: usize = 64;
 
 #[derive(Default)]
+#[allow(dead_code)]
 struct DiffPrefetchState {
     pending: VecDeque<(PathBuf, git2::Oid)>,
     scheduled: HashSet<git2::Oid>,
@@ -2478,11 +2457,13 @@ struct DiffPrefetchState {
 /// Interactive selections bypass this queue, while prewarm/neighbor work is
 /// deduplicated and limited to a small number of background computations.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub(super) struct DiffPrefetchScheduler {
     cache: Arc<Mutex<CommitDiffCache>>,
     state: Arc<Mutex<DiffPrefetchState>>,
 }
 
+#[allow(dead_code)]
 impl DiffPrefetchScheduler {
     pub(super) fn new(cache: Arc<Mutex<CommitDiffCache>>) -> Self {
         Self {
@@ -2595,7 +2576,6 @@ pub(super) fn subscribe_graph(
     diff_viewer: &Entity<DiffViewer>,
     detail_panel: &Entity<DetailPanel>,
     diff_cache: Arc<Mutex<CommitDiffCache>>,
-    diff_prefetch: DiffPrefetchScheduler,
 ) {
     let project = project.clone();
     let diff_viewer = diff_viewer.clone();
@@ -2623,29 +2603,13 @@ pub(super) fn subscribe_graph(
 
                     // Extract everything we need from the project before
                     // releasing the immutable borrow on cx.
-                    let (commit_info, repo_path, prefetch_oids) = {
+                    let (commit_info, repo_path) = {
                         let proj = project.read(cx);
                         let commits = proj.recent_commits();
                         let info = commits.iter().find(|c| c.oid == commit_oid).cloned();
                         let path = proj.repo_path().to_path_buf();
 
-                        const PREFETCH_WINDOW: usize = 25;
-                        let mut oids = Vec::new();
-                        if let Some(idx) = commits.iter().position(|c| c.oid == commit_oid) {
-                            for delta in 1..=PREFETCH_WINDOW {
-                                if let Some(prev_idx) = idx.checked_sub(delta) {
-                                    if let Some(c) = commits.get(prev_idx) {
-                                        oids.push(c.oid);
-                                    }
-                                }
-                                if let Some(next_idx) = idx.checked_add(delta) {
-                                    if let Some(c) = commits.get(next_idx) {
-                                        oids.push(c.oid);
-                                    }
-                                }
-                            }
-                        }
-                        (info, path, oids)
+                        (info, path)
                     };
 
                     // Check cache synchronously — instant display on cache hit.
@@ -2691,8 +2655,8 @@ pub(super) fn subscribe_graph(
                         // cache miss. Otherwise the old file list is clickable
                         // while a new commit diff is loading.
                         detail_panel_ref.update(cx, |dp, cx| dp.clear(cx));
-                        // Cache miss — submit selected commit first so it gets
-                        // a thread pool slot before the prefetch tasks.
+                        // Load only changed-file metadata. Text is parsed after
+                        // the user selects a file in the detail panel.
                         let dv = diff_viewer.clone();
                         let dp = detail_panel_ref.clone();
                         let cache = diff_cache.clone();
@@ -2703,7 +2667,7 @@ pub(super) fn subscribe_graph(
                         cx.spawn(async move |_, cx: &mut gpui::AsyncApp| {
                             // Compute diff and enrich commit info in parallel
                             let diff_task = cx.background_executor().spawn(async move {
-                                rgitui_git::compute_commit_diff(&repo_path, commit_oid)
+                                rgitui_git::compute_commit_file_list(&repo_path, commit_oid)
                             });
                             let enrich_task = cx.background_executor().spawn(async move {
                                 rgitui_git::enrich_commit_info(&enrich_path, commit_oid)
@@ -2763,15 +2727,6 @@ pub(super) fn subscribe_graph(
                     // Prefetch neighbors — runs in both cache hit and miss cases.
                     // On miss, this fires AFTER the selected commit task is queued,
                     // so the selected commit gets a thread pool slot first.
-                    if !prefetch_oids.is_empty() {
-                        log::debug!(
-                            "diff_prefetch: starting for {} OIDs around {:.7}",
-                            prefetch_oids.len(),
-                            commit_oid
-                        );
-                        let prefetch_repo_path = project.read(cx).repo_path().to_path_buf();
-                        diff_prefetch.enqueue(prefetch_repo_path, prefetch_oids, cx);
-                    }
                 }
                 GraphViewEvent::CherryPick(oid) => {
                     let oid = *oid;
@@ -3101,12 +3056,50 @@ pub(super) fn subscribe_detail_panel(
                     tab.file_history_view.update(cx, |view, cx| view.clear(cx));
                     cx.notify();
                 }
-                let p = path.clone();
-                let fd = file_diff.clone();
-                let source = source.clone();
-                diff_viewer.update(cx, |dv, cx| {
-                    dv.set_diff(fd, p, source, cx);
-                });
+                if let DiffSource::Commit(oid) = source {
+                    if file_diff.is_binary {
+                        this.show_toast(t!("diff.skipped.binary").to_string(), ToastKind::Info, cx);
+                        diff_viewer.update(cx, |dv, cx| dv.clear(cx));
+                        return;
+                    }
+                    let max_size = cx.global::<rgitui_settings::SettingsState>()
+                        .settings().diff_file_size_limit_mb as u64 * 1024 * 1024;
+                    if file_diff.size_bytes > max_size {
+                        this.show_toast(
+                            t!("diff.skipped.large", size = file_diff.size_bytes / (1024 * 1024), limit = max_size / (1024 * 1024)).to_string(),
+                            ToastKind::Info,
+                            cx,
+                        );
+                        diff_viewer.update(cx, |dv, cx| dv.clear(cx));
+                        return;
+                    }
+                    let Ok(oid) = git2::Oid::from_str(&oid) else { return };
+                    let repo_path = project.read(cx).repo_path().to_path_buf();
+                    let path = std::path::PathBuf::from(path);
+                    let dv = diff_viewer.clone();
+                    let request_generation = dv.update(cx, |dv, cx| dv.begin_diff_request(cx));
+                    cx.spawn(async move |_, cx: &mut gpui::AsyncApp| {
+                        let result = cx.background_executor().spawn(async move {
+                            rgitui_git::compute_commit_file_diff(&repo_path, oid, &path, max_size)
+                        }).await;
+                        cx.update(|cx| {
+                            if dv.read(cx).generation() != request_generation { return; }
+                            match result {
+                                Ok(Some(file)) => {
+                                    let path = file.path.display().to_string();
+                                    dv.update(cx, |dv, cx| dv.set_diff(file, path, DiffSource::Commit(oid.to_string()), cx));
+                                }
+                                Ok(None) => dv.update(cx, |dv, cx| dv.clear(cx)),
+                                Err(error) => dv.update(cx, |dv, cx| dv.set_error(format!("Failed to load file diff: {error}"), cx)),
+                            }
+                        });
+                    }).detach();
+                } else {
+                    let p = path.clone();
+                    let fd = file_diff.clone();
+                    let source = source.clone();
+                    diff_viewer.update(cx, |dv, cx| dv.set_diff(fd, p, source, cx));
+                }
             }
             DetailPanelEvent::CopySha(sha) => {
                 let short = &sha[..7.min(sha.len())];

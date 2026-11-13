@@ -349,6 +349,8 @@ pub struct FileDiff {
     pub additions: usize,
     pub deletions: usize,
     pub kind: FileChangeKind,
+    pub size_bytes: u64,
+    pub is_binary: bool,
 }
 
 /// A complete commit diff (all files).

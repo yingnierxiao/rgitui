@@ -10,9 +10,7 @@ use crate::types::*;
 use super::argsafe::{validate_branch_name, validate_remote_name};
 use super::auth::run_git_network_command;
 use super::refresh::gather_refresh_data;
-use super::{
-    head_branch_name, pull_target, push_target, GitProject, GitProjectEvent, RefreshData,
-};
+use super::{head_branch_name, pull_target, push_target, GitProject, GitProjectEvent, RefreshData};
 
 /// Non-fast-forward and fetch-first rejections are recoverable; permissions,
 /// network errors, protected branches, and hook rejections are not.
@@ -39,7 +37,38 @@ fn is_remote_ahead_rejection(error: &str) -> bool {
 fn is_pull_blocked_by_local_edits(error: &str) -> bool {
     let text = error.to_ascii_lowercase();
     text.contains("your local changes to the following files would be overwritten by merge")
-        || text.contains("your local changes to the following files would be overwritten by checkout")
+        || text
+            .contains("your local changes to the following files would be overwritten by checkout")
+}
+
+fn pending_merge_autostash(repo: &mut Repository) -> Result<Option<git2::Oid>> {
+    match repo.find_reference("MERGE_AUTOSTASH") {
+        Ok(reference) => {
+            if let Some(oid) = reference.target() {
+                return Ok(Some(oid));
+            }
+        }
+        Err(error) if error.code() == git2::ErrorCode::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    let mut autostash = None;
+    repo.stash_foreach(|_, message, oid| {
+        if message.to_ascii_lowercase().contains("autostash") {
+            autostash = Some(*oid);
+            false
+        } else {
+            true
+        }
+    })?;
+    Ok(autostash)
+}
+
+fn head_contains_fetched_commit(repo: &Repository) -> Result<(git2::Oid, git2::Oid, bool)> {
+    let head = repo.head()?.peel_to_commit()?.id();
+    let fetched = repo.revparse_single("FETCH_HEAD")?.id();
+    let integrated = head == fetched || repo.graph_descendant_of(head, fetched)?;
+    Ok((head, fetched, integrated))
 }
 
 /// Attempt to recover a normal rejected push by incorporating the exact
@@ -64,7 +93,11 @@ fn push_with_auto_pull(
     log::info!(
         "push timing: initial push completed in {:?} result={} remote={} branch={}",
         first_started.elapsed(),
-        if initial_push.is_ok() { "success" } else { "failed" },
+        if initial_push.is_ok() {
+            "success"
+        } else {
+            "failed"
+        },
         remote,
         remote_branch,
     );
@@ -77,7 +110,7 @@ fn push_with_auto_pull(
                 remote_branch
             );
             let check_started = std::time::Instant::now();
-            let repo = open_worktree_repo(worktree)?;
+            let mut repo = open_worktree_repo(worktree)?;
             // A remote may use a different push URL from its fetch URL.
             // Pulling from that other repository would merge the wrong history.
             let push_url_differs = {
@@ -90,6 +123,11 @@ fn push_with_auto_pull(
                 anyhow::bail!(
                     "Remote {remote} has a different push URL and fetch URL. Automatic pull \
                      was skipped to avoid merging an unrelated branch."
+                );
+            }
+            if let Some(autostash_oid) = pending_merge_autostash(&mut repo)? {
+                anyhow::bail!(
+                    "Remote {remote}/{remote_branch} has new commits, but automatic pull was skipped because Git has a pending MERGE_AUTOSTASH ({autostash_oid}). The saved local changes were preserved; inspect the worktree and stash before retrying."
                 );
             }
             if repo.state() != RepositoryState::Clean {
@@ -127,14 +165,15 @@ fn push_with_auto_pull(
             } else {
                 vec!["pull", "--no-rebase", "--no-edit", remote, remote_branch]
             };
-            let pull_result = run_git_network_command(
-                worktree,
-                &pull_args,
-            );
+            let pull_result = run_git_network_command(worktree, &pull_args);
             log::info!(
                 "push timing: automatic pull completed in {:?} result={} remote={} branch={}",
                 pull_started.elapsed(),
-                if pull_result.is_ok() { "success" } else { "failed" },
+                if pull_result.is_ok() {
+                    "success"
+                } else {
+                    "failed"
+                },
                 remote,
                 remote_branch,
             );
@@ -148,24 +187,24 @@ fn push_with_auto_pull(
             // Distinguish a genuine concurrent remote push from a local
             // integration problem. Git's FETCH_HEAD is what the pull merged,
             // not necessarily the remote-tracking branch's previous tip.
-            if let Ok(repo) = open_worktree_repo(worktree) {
-                let head = repo.head().ok().and_then(|reference| reference.target());
-                let fetched = repo.revparse_single("FETCH_HEAD").ok().map(|obj| obj.id());
-                if let (Some(head), Some(fetched)) = (head, fetched) {
-                    let integrated = head == fetched
-                        || repo.graph_descendant_of(head, fetched).unwrap_or(false);
-                    log::info!(
-                        "push auto-pull ancestry: head={} fetch_head={} integrated={} remote={} branch={}",
-                        head, fetched, integrated, remote, remote_branch
-                    );
-                    if !integrated {
-                        log::warn!(
-                            "automatic pull reported success but HEAD does not contain FETCH_HEAD; retry may be rejected"
-                        );
-                    }
-                } else {
-                    log::debug!("push auto-pull ancestry: FETCH_HEAD/HEAD unavailable");
-                }
+            let repo = open_worktree_repo(worktree)?;
+            let (head, fetched, integrated) = head_contains_fetched_commit(&repo).map_err(|error| {
+                anyhow::anyhow!(
+                    "Automatic pull of {remote}/{remote_branch} reported success, but rgitui could not verify that the fetched commit was merged into the checked-out branch: {error}. Push was not retried."
+                )
+            })?;
+            log::info!(
+                "push auto-pull ancestry: head={} fetch_head={} integrated={} remote={} branch={}",
+                head,
+                fetched,
+                integrated,
+                remote,
+                remote_branch
+            );
+            if !integrated {
+                anyhow::bail!(
+                    "Automatic pull of {remote}/{remote_branch} reported success, but the checked-out branch does not contain fetched commit {fetched}. Push was not retried. Inspect the branch and resolve the merge before pushing."
+                );
             }
 
             // Retry exactly once. A second rejection may mean a concurrent
@@ -175,7 +214,11 @@ fn push_with_auto_pull(
             log::info!(
                 "push timing: retry push completed in {:?} result={} remote={} branch={}",
                 retry_started.elapsed(),
-                if retry_result.is_ok() { "success" } else { "failed" },
+                if retry_result.is_ok() {
+                    "success"
+                } else {
+                    "failed"
+                },
                 remote,
                 remote_branch
             );
@@ -264,7 +307,9 @@ mod pull_arguments_tests {
         assert!(!super::is_pull_blocked_by_local_edits(
             "CONFLICT (content): Merge conflict in Assets/RS.cs"
         ));
-        assert!(!super::is_pull_blocked_by_local_edits("Authentication failed"));
+        assert!(!super::is_pull_blocked_by_local_edits(
+            "Authentication failed"
+        ));
     }
 
     #[test]
@@ -632,7 +677,8 @@ impl GitProject {
                                 if conflict_count > 0
                                     || error_msg.contains("CONFLICT")
                                     || error_msg.contains("Automatic merge failed")
-                                    || error_msg.contains("Applying autostash resulted in conflicts")
+                                    || error_msg
+                                        .contains("Applying autostash resulted in conflicts")
                                 {
                                     let msg = msgp!(
                                         "git.pull.conflicts_detail",
@@ -938,7 +984,10 @@ impl GitProject {
 
 #[cfg(test)]
 mod push_auto_pull_tests {
-    use super::{is_remote_ahead_rejection, push_with_auto_pull};
+    use super::{
+        head_contains_fetched_commit, is_remote_ahead_rejection, pending_merge_autostash,
+        push_with_auto_pull,
+    };
     use git2::{Repository, RepositoryState};
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -982,7 +1031,12 @@ mod push_auto_pull_tests {
             let peer = dir.path().join("peer");
             git(
                 dir.path(),
-                &["init", "--bare", "--initial-branch=dev", remote.to_str().unwrap()],
+                &[
+                    "init",
+                    "--bare",
+                    "--initial-branch=dev",
+                    remote.to_str().unwrap(),
+                ],
             );
             git(
                 dir.path(),
@@ -991,11 +1045,20 @@ mod push_auto_pull_tests {
             git(&local, &["config", "user.name", "Local Tester"]);
             git(&local, &["config", "user.email", "local@example.test"]);
             commit(&local, "base.txt", "base\n", "base");
-            git(&local, &["remote", "add", "origin", remote.to_str().unwrap()]);
+            git(
+                &local,
+                &["remote", "add", "origin", remote.to_str().unwrap()],
+            );
             git(&local, &["push", "-u", "origin", "dev"]);
             git(
                 dir.path(),
-                &["clone", "--branch", "dev", remote.to_str().unwrap(), peer.to_str().unwrap()],
+                &[
+                    "clone",
+                    "--branch",
+                    "dev",
+                    remote.to_str().unwrap(),
+                    peer.to_str().unwrap(),
+                ],
             );
             git(&peer, &["config", "user.name", "Peer Tester"]);
             git(&peer, &["config", "user.email", "peer@example.test"]);
@@ -1052,6 +1115,69 @@ mod push_auto_pull_tests {
     }
 
     #[test]
+    fn successful_pull_is_not_retried_unless_head_contains_fetch_head() {
+        let repos = TestRepos::new();
+        repos.push_peer("peer.txt", "remote update\n");
+        git(&repos.local, &["fetch", "origin", "dev"]);
+
+        let repo = Repository::open(&repos.local).unwrap();
+        let (head, fetched, integrated) = head_contains_fetched_commit(&repo).unwrap();
+        assert_ne!(head, fetched);
+        assert!(!integrated);
+    }
+
+    #[test]
+    fn pending_merge_autostash_blocks_another_automatic_pull_without_mutation() {
+        let repos = TestRepos::new();
+        repos.push_peer("peer.txt", "remote update\n");
+        fs::write(repos.local.join("base.txt"), "local edit\n").unwrap();
+        let local_head = git(&repos.local, &["rev-parse", "HEAD"]);
+        let mut pulled = false;
+        let mut repo = Repository::open(&repos.local).unwrap();
+        let oid = repo.head().unwrap().target().unwrap();
+        repo.reference("MERGE_AUTOSTASH", oid, true, "simulate stranded autostash")
+            .unwrap();
+        assert_eq!(pending_merge_autostash(&mut repo).unwrap(), Some(oid));
+        drop(repo);
+
+        let error = repos.push_with_recovery(&mut pulled).unwrap_err();
+
+        assert!(error.to_string().contains("pending MERGE_AUTOSTASH"));
+        assert!(!pulled);
+        assert_eq!(git(&repos.local, &["rev-parse", "HEAD"]), local_head);
+        assert_eq!(
+            fs::read_to_string(repos.local.join("base.txt")).unwrap(),
+            "local edit\n"
+        );
+        assert_eq!(
+            repos.remote_head(),
+            git(&repos.peer, &["rev-parse", "HEAD"])
+        );
+        assert_eq!(
+            Repository::open(&repos.local).unwrap().state(),
+            RepositoryState::Clean
+        );
+    }
+
+    #[test]
+    fn stranded_autostash_in_stash_list_blocks_automatic_pull() {
+        let repos = TestRepos::new();
+        repos.push_peer("peer.txt", "remote update\n");
+        fs::write(repos.local.join("base.txt"), "local edit\n").unwrap();
+        git(&repos.local, &["stash", "push", "--message=autostash"]);
+        let mut repo = Repository::open(&repos.local).unwrap();
+        assert!(pending_merge_autostash(&mut repo).unwrap().is_some());
+        drop(repo);
+
+        let mut pulled = false;
+        let error = repos.push_with_recovery(&mut pulled).unwrap_err();
+
+        assert!(error.to_string().contains("pending MERGE_AUTOSTASH"));
+        assert!(!pulled);
+        assert!(git(&repos.local, &["stash", "list"]).contains("autostash"));
+    }
+
+    #[test]
     fn rejected_divergent_push_pulls_and_retries_without_rewriting_commits() {
         let repos = TestRepos::new();
         repos.push_peer("peer.txt", "new remote file\n");
@@ -1067,7 +1193,9 @@ mod push_auto_pull_tests {
         );
         let parents = git(&repos.local, &["show", "-s", "--format=%P", "HEAD"]);
         assert_eq!(parents.split_whitespace().count(), 2);
-        assert!(parents.split_whitespace().any(|sha| sha == original_local_head));
+        assert!(parents
+            .split_whitespace()
+            .any(|sha| sha == original_local_head));
         assert!(repos.local.join("peer.txt").exists());
         assert!(repos.local.join("mine.txt").exists());
     }
@@ -1079,7 +1207,10 @@ mod push_auto_pull_tests {
         let mut pulled = false;
         repos.push_with_recovery(&mut pulled).unwrap();
         assert!(pulled);
-        assert_eq!(git(&repos.local, &["rev-parse", "HEAD"]), repos.remote_head());
+        assert_eq!(
+            git(&repos.local, &["rev-parse", "HEAD"]),
+            repos.remote_head()
+        );
         let parents = git(&repos.local, &["show", "-s", "--format=%P", "HEAD"]);
         assert_eq!(parents.split_whitespace().count(), 1);
     }
@@ -1094,7 +1225,10 @@ mod push_auto_pull_tests {
         let result = repos.push_with_recovery(&mut pulled).unwrap();
         assert!(pulled);
         assert!(result.unwrap().contains("restored local changes"));
-        assert_eq!(git(&repos.local, &["rev-parse", "HEAD"]), repos.remote_head());
+        assert_eq!(
+            git(&repos.local, &["rev-parse", "HEAD"]),
+            repos.remote_head()
+        );
         assert_ne!(git(&repos.local, &["rev-parse", "HEAD"]), previous_head);
         assert!(repos.local.join("peer.txt").exists());
         assert_eq!(

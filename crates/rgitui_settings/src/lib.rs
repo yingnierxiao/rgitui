@@ -248,6 +248,9 @@ pub struct AppSettings {
     pub diff_view_mode: DiffViewMode,
     #[serde(default)]
     pub diff_wrap_lines: bool,
+    /// Maximum blob size whose text diff is parsed, in MiB.
+    #[serde(default = "default_diff_file_size_limit_mb")]
+    pub diff_file_size_limit_mb: usize,
     #[serde(default)]
     pub graph_style: GraphStyle,
     #[serde(default = "default_show_subject_column")]
@@ -323,6 +326,10 @@ fn default_font_size() -> u32 {
 
 fn default_show_line_numbers_in_diff() -> bool {
     true
+}
+
+fn default_diff_file_size_limit_mb() -> usize {
+    5
 }
 
 fn default_show_subject_column() -> bool {
@@ -808,6 +815,7 @@ impl Default for AppSettings {
             show_line_numbers_in_diff: default_show_line_numbers_in_diff(),
             diff_view_mode: DiffViewMode::default(),
             diff_wrap_lines: false,
+            diff_file_size_limit_mb: default_diff_file_size_limit_mb(),
             graph_style: GraphStyle::default(),
             show_subject_column: default_show_subject_column(),
             author_column_width: default_author_column_width(),
@@ -1979,6 +1987,7 @@ mod tests {
         assert!(settings.ai.models_by_provider.is_empty());
         assert!(settings.ai.base_url_override.is_empty());
         assert!(settings.ai.openrouter_attribution);
+        assert_eq!(settings.diff_file_size_limit_mb, 5);
     }
 
     #[test]

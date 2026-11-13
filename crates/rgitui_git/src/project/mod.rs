@@ -136,7 +136,7 @@ fn english_messages_env(
 pub use bisect::{compute_bisect_log, is_bisect_in_progress, BisectDecision, BisectLogEntry};
 pub use blame::{compute_blame, BlameEntry, BlameLine};
 pub use diff::{
-    compute_commit_diff, compute_compare_diff, compute_file_diff, compute_staged_diff_text, compute_stash_diff,
+    compute_commit_diff, compute_commit_file_diff, compute_commit_file_list, compute_compare_diff, compute_file_diff, compute_staged_diff_text, compute_stash_diff,
     compute_three_way_conflict_diff,
 };
 pub use file_history::{compute_file_history, compute_file_history_at};

@@ -443,6 +443,102 @@ pub(crate) fn parse_multi_file_diff(diff: &git2::Diff) -> Result<CommitDiff> {
     })
 }
 
+/// Build a commit's changed-file list without retaining line contents.
+pub fn compute_commit_file_list(repo_path: &Path, oid: git2::Oid) -> Result<CommitDiff> {
+    let repo = Repository::open(repo_path)?;
+    let commit = repo.find_commit(oid)?;
+    let tree = commit.tree()?;
+    let parent_tree = if commit.parent_count() > 0 {
+        Some(commit.parent(0)?.tree()?)
+    } else {
+        None
+    };
+    let diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None)?;
+    let mut files = Vec::with_capacity(diff.deltas().len());
+    let mut total_additions = 0;
+    let mut total_deletions = 0;
+    for delta in diff.deltas() {
+        let path = delta
+            .new_file()
+            .path()
+            .or_else(|| delta.old_file().path())
+            .unwrap_or(Path::new(""))
+            .to_path_buf();
+        let new_blob = repo.find_blob(delta.new_file().id()).ok();
+        let old_blob = repo.find_blob(delta.old_file().id()).ok();
+        let new_size = new_blob
+            .as_ref()
+            .map(|blob| blob.size() as u64)
+            .unwrap_or(0);
+        let old_size = old_blob
+            .as_ref()
+            .map(|blob| blob.size() as u64)
+            .unwrap_or(0);
+        let (additions, deletions) = git2::Patch::from_diff(&diff, files.len())?
+            .and_then(|patch| patch.line_stats().ok())
+            .map(|(_, additions, deletions)| (additions, deletions))
+            .unwrap_or((0, 0));
+        total_additions += additions;
+        total_deletions += deletions;
+        files.push(FileDiff {
+            path,
+            hunks: Vec::new(),
+            additions,
+            deletions,
+            kind: delta_to_file_change_kind(delta.status()),
+            size_bytes: new_size.max(old_size),
+            is_binary: new_blob.as_ref().is_some_and(|blob| blob.is_binary())
+                || old_blob.as_ref().is_some_and(|blob| blob.is_binary()),
+        });
+    }
+    Ok(CommitDiff {
+        files,
+        total_additions,
+        total_deletions,
+    })
+}
+
+/// Compute only one file's text diff for a commit.
+pub fn compute_commit_file_diff(
+    repo_path: &Path,
+    oid: git2::Oid,
+    file_path: &Path,
+    max_size_bytes: u64,
+) -> Result<Option<FileDiff>> {
+    let repo = Repository::open(repo_path)?;
+    let commit = repo.find_commit(oid)?;
+    let tree = commit.tree()?;
+    let parent_tree = if commit.parent_count() > 0 {
+        Some(commit.parent(0)?.tree()?)
+    } else {
+        None
+    };
+    let mut options = git2::DiffOptions::new();
+    options.pathspec(file_path).disable_pathspec_match(true);
+    let diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut options))?;
+    let Some(mut patch) = git2::Patch::from_diff(&diff, 0)? else {
+        return Ok(None);
+    };
+    let delta = patch.delta();
+    let new_blob = repo.find_blob(delta.new_file().id()).ok();
+    let old_blob = repo.find_blob(delta.old_file().id()).ok();
+    let new_size = new_blob
+        .as_ref()
+        .map(|blob| blob.size() as u64)
+        .unwrap_or(0);
+    let old_size = old_blob
+        .as_ref()
+        .map(|blob| blob.size() as u64)
+        .unwrap_or(0);
+    let size_bytes = new_size.max(old_size);
+    let is_binary = new_blob.as_ref().is_some_and(|blob| blob.is_binary())
+        || old_blob.as_ref().is_some_and(|blob| blob.is_binary());
+    if is_binary || size_bytes > max_size_bytes {
+        return Ok(None);
+    }
+    Ok(Some(parse_single_patch(&mut patch)?))
+}
+
 /// Parse a single git2::Patch into a FileDiff.
 /// Uses the patch's print callback to extract hunk/line content.
 fn parse_single_patch(patch: &mut git2::Patch) -> Result<FileDiff> {
@@ -506,6 +602,8 @@ fn parse_single_patch(patch: &mut git2::Patch) -> Result<FileDiff> {
         additions,
         deletions,
         kind,
+        size_bytes: patch.delta().new_file().size().max(patch.delta().old_file().size()),
+        is_binary: patch.delta().flags().is_binary(),
     })
 }
 
@@ -528,6 +626,8 @@ pub(crate) fn parse_file_diff(path: &Path, diff: &git2::Diff) -> Result<FileDiff
         additions: 0,
         deletions: 0,
         kind: FileChangeKind::Modified,
+        size_bytes: 0,
+        is_binary: false,
     };
 
     diff.print(git2::DiffFormat::Patch, |delta, hunk, line| {
@@ -2034,6 +2134,37 @@ mod diff_integration_tests {
         let diff = compute_commit_diff(fixture.path(), fixture.head_oid()).unwrap();
         assert_eq!(diff.files.len(), 1, "should have exactly one changed file");
         assert_eq!(diff.files[0].path, Path::new("hello.txt"));
+    }
+
+    #[test]
+    fn commit_file_list_keeps_metadata_without_line_contents() {
+        let fixture = make_two_commit_repo();
+        let diff = compute_commit_file_list(fixture.path(), fixture.head_oid()).unwrap();
+        assert_eq!(diff.files.len(), 1);
+        assert!(diff.files[0].hunks.is_empty());
+        assert_eq!(diff.files[0].size_bytes, 26);
+    }
+
+    #[test]
+    fn commit_file_diff_respects_size_limit() {
+        let fixture = make_two_commit_repo();
+        let skipped = compute_commit_file_diff(
+            fixture.path(),
+            fixture.head_oid(),
+            Path::new("hello.txt"),
+            1,
+        )
+        .unwrap();
+        assert!(skipped.is_none());
+        let loaded = compute_commit_file_diff(
+            fixture.path(),
+            fixture.head_oid(),
+            Path::new("hello.txt"),
+            1024,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!loaded.hunks.is_empty());
     }
 
     #[test]

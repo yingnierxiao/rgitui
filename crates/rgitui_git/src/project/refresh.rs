@@ -50,10 +50,35 @@ pub(super) struct WorktreeStatusCache {
     scan_locks: HashMap<PathBuf, Arc<Mutex<()>>>,
 }
 
+#[cfg(feature = "perf")]
+impl rgitui_perf::HeapSize for WorktreeStatusCacheEntry {
+    fn heap_size(&self, census: &mut rgitui_perf::Census) -> usize {
+        self.status.heap_size(census)
+    }
+}
+
+#[cfg(feature = "perf")]
+impl rgitui_perf::HeapSize for WorktreeStatusCache {
+    fn heap_size(&self, census: &mut rgitui_perf::Census) -> usize {
+        self.entries.heap_size(census)
+            + self.generations.heap_size(census)
+            + self.scan_locks.len() * std::mem::size_of::<(PathBuf, Arc<Mutex<()>>)>()
+    }
+
+    fn heap_count(&self) -> Option<usize> {
+        Some(self.entries.len())
+    }
+}
+
 impl WorktreeStatusCache {
     #[cfg(test)]
     fn new() -> Self {
         Self::default()
+    }
+
+    #[cfg(feature = "perf")]
+    pub(super) fn len(&self) -> usize {
+        self.entries.len()
     }
 
     fn generation(&self, path: &Path) -> u64 {

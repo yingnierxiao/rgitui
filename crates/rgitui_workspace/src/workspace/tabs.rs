@@ -97,7 +97,6 @@ impl Workspace {
         });
 
         let caches = super::ViewCaches::new();
-        let diff_prefetch = super::events::DiffPrefetchScheduler::new(caches.diff.clone());
 
         // Set up subscriptions for child component events
         super::events::subscribe_project(
@@ -109,8 +108,6 @@ impl Workspace {
                 diff_viewer: &diff_viewer,
                 detail_panel: &detail_panel,
                 toolbar: &toolbar,
-                diff_cache: caches.diff.clone(),
-                diff_prefetch: diff_prefetch.clone(),
             },
         );
         super::events::subscribe_sidebar(cx, &project, &sidebar, &diff_viewer, &detail_panel);
@@ -121,7 +118,6 @@ impl Workspace {
             &diff_viewer,
             &detail_panel,
             caches.diff.clone(),
-            diff_prefetch,
         );
         super::events::subscribe_detail_panel(cx, &project, &diff_viewer, &detail_panel);
         super::events::subscribe_diff_viewer(cx, &project, &diff_viewer, caches.clone());
