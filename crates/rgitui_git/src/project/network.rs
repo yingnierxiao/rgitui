@@ -18,11 +18,19 @@ use super::{
 /// network errors, protected branches, and hook rejections are not.
 fn is_remote_ahead_rejection(error: &str) -> bool {
     let message = error.to_ascii_lowercase();
-    message.contains("[rejected]")
+    let normal_non_fast_forward = message.contains("[rejected]")
         && (message.contains("(fetch first)")
             || message.contains("(non-fast-forward)")
             || message.contains("remote contains work that you do not have locally")
-            || message.contains("tip of your current branch is behind"))
+            || message.contains("tip of your current branch is behind"));
+    // A concurrent push can race the remote receive-pack after negotiation.
+    // Git reports that race as `remote rejected` instead of `rejected`, with
+    // the old and new ref values in the error. It is recoverable by fetching
+    // the newer ref, merging it, and retrying once.
+    let concurrent_remote_update = message.contains("cannot lock ref")
+        && message.contains("failed to update ref")
+        && message.contains(" but expected ");
+    normal_non_fast_forward || concurrent_remote_update
 }
 
 /// Git refuses to start a merge when it would overwrite existing local edits.
@@ -1027,6 +1035,12 @@ mod push_auto_pull_tests {
         ));
         assert!(is_remote_ahead_rejection(
             " ! [rejected] HEAD -> dev (non-fast-forward)"
+        ));
+        assert!(is_remote_ahead_rejection(
+            " ! [remote rejected] HEAD -> dev (failed to update ref)\n\
+             remote: error: cannot lock ref 'refs/heads/dev': is at \
+             831c266225783dba1a679861c18e06e936ee1013 but expected \
+             9f8b0d5602a5396e68665353d090b7678d8edfcf"
         ));
         assert!(!is_remote_ahead_rejection(
             " ! [remote rejected] HEAD -> dev (pre-receive hook declined)"
