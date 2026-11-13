@@ -6,8 +6,8 @@ use gpui::{
 use rgitui_i18n::{t, tp};
 use rgitui_theme::{ActiveTheme, Color, StyledExt};
 use rgitui_ui::{
-    Button, ButtonSize, ButtonStyle, Icon, IconButton, IconName, IconSize, Label, LabelSize,
-    Tab, TabBar, Tooltip,
+    Button, ButtonSize, ButtonStyle, Icon, IconButton, IconName, IconSize, Label, LabelSize, Tab,
+    TabBar, Tooltip,
 };
 
 use crate::keymap;
@@ -15,7 +15,7 @@ use crate::{CommandId, StatusBar, TitleBar, ToastKind};
 
 use super::{
     BottomPanelMode, CommitInputResize, DetailPanelResize, DiffViewerResize, FocusedPanel,
-    RightPanelMode, SidebarResize, ViewAvailability, Workspace,
+    HistoryFilePanelResize, RightPanelMode, SidebarResize, ViewAvailability, Workspace,
 };
 
 /// Key context identifier for the workspace root.
@@ -31,6 +31,10 @@ const WORKSPACE_MODAL_KEY_CONTEXT: &str = "Workspace modal";
 /// Ctrl+[ / Ctrl+] keyboard shortcuts so both input paths clamp identically.
 pub(super) const MIN_DETAIL_PANEL_WIDTH: f32 = 180.0;
 pub(super) const MAX_DETAIL_PANEL_WIDTH: f32 = 720.0;
+
+/// 历史详情文件列表的拖拽范围。
+const MIN_HISTORY_FILE_PANEL_WIDTH: f32 = 180.0;
+const MAX_HISTORY_FILE_PANEL_WIDTH: f32 = 560.0;
 
 /// Shortest the bottom diff viewer can be made.
 const MIN_DIFF_VIEWER_HEIGHT: f32 = 100.0;
@@ -220,14 +224,10 @@ impl Render for Workspace {
         // rather than where the graph is hidden because the command palette
         // hides it without a `Window`, and containment is resolved against the
         // previous frame: the last one in which the graph was there to hold it.
-        if self
-            .tabs
-            .get(self.active_tab)
-            .is_some_and(|tab| {
-                tab.right_panel_mode != RightPanelMode::History
-                    && tab.graph.read(cx).contains_focus(window, cx)
-            })
-        {
+        if self.tabs.get(self.active_tab).is_some_and(|tab| {
+            tab.right_panel_mode != RightPanelMode::History
+                && tab.graph.read(cx).contains_focus(window, cx)
+        }) {
             self.focus_panel(FocusedPanel::DiffViewer, window, cx);
         }
         // Tab switching unmounts the old view. Rehome keyboard focus before
@@ -235,11 +235,11 @@ impl Render for Workspace {
         if let Some(target) = self.tabs.get(self.active_tab).and_then(|tab| {
             (tab.right_panel_mode != RightPanelMode::Details
                 && tab.changes_panel.read(cx).is_focused(window))
-                .then_some(if tab.right_panel_mode == RightPanelMode::History {
-                    FocusedPanel::Graph
-                } else {
-                    FocusedPanel::Sidebar
-                })
+            .then_some(if tab.right_panel_mode == RightPanelMode::History {
+                FocusedPanel::Graph
+            } else {
+                FocusedPanel::Sidebar
+            })
         }) {
             self.focus_panel(target, window, cx);
         }
@@ -419,6 +419,10 @@ impl Render for Workspace {
         let diff_focused = active_tab.bottom_panel_focused(window, cx);
         let focus_accent = colors.border_focused;
         let bottom_panel_mode = active_tab.bottom_panel_mode;
+        let history_file_panel_width = self
+            .layout
+            .history_file_panel_width
+            .clamp(MIN_HISTORY_FILE_PANEL_WIDTH, MAX_HISTORY_FILE_PANEL_WIDTH);
         let current_view_key = active_tab.current_view_cache_key(cx);
         let (history_availability, blame_availability) = current_view_key
             .as_ref()
@@ -453,6 +457,7 @@ impl Render for Workspace {
                     ws.update(cx, |ws, cx| {
                         if i < ws.tabs.len() {
                             ws.active_tab = i;
+                            ws.persist_workspace_snapshot(cx);
                             cx.notify();
                         }
                     })
@@ -511,8 +516,10 @@ impl Render for Workspace {
             .stash_count(stash_count)
             .repo_path(repo_path_display)
             .loading(!self.operations.active_operations.is_empty())
-            .error(self.operations.active_git_operation.is_none()
-                && self.operations.last_failed_git_operation.is_some())
+            .error(
+                self.operations.active_git_operation.is_none()
+                    && self.operations.last_failed_git_operation.is_some(),
+            )
             .head_detached(head_detached);
         if !repo_state.is_clean() {
             status_bar = status_bar.repo_state_label(repo_state.label().translated());
@@ -786,6 +793,19 @@ impl Render for Workspace {
                                 this.layout.content_bounds.bottom() - e.event.position.y,
                             ));
                             this.layout.diff_viewer_height = new_h;
+                            this.schedule_layout_save(cx);
+                            cx.notify();
+                        },
+                    ))
+                    .on_drag_move::<HistoryFilePanelResize>(cx.listener(
+                        |this, e: &DragMoveEvent<HistoryFilePanelResize>, _, cx| {
+                            let center_left = this.layout.content_bounds.left()
+                                + px(this.layout.sidebar_width);
+                            let new_w = f32::from(e.event.position.x - center_left).clamp(
+                                MIN_HISTORY_FILE_PANEL_WIDTH,
+                                MAX_HISTORY_FILE_PANEL_WIDTH,
+                            );
+                            this.layout.history_file_panel_width = new_w;
                             this.schedule_layout_save(cx);
                             cx.notify();
                         },
@@ -1080,7 +1100,8 @@ impl Render for Workspace {
                                                     |el| {
                                                         el.child(
                                                             div()
-                                                                .w(px(255.))
+                                                                .relative()
+                                                                .w(px(history_file_panel_width))
                                                                 .h_full()
                                                                 .flex_shrink_0()
                                                                 .border_r_1()
@@ -1090,6 +1111,37 @@ impl Render for Workspace {
                                                                         .detail_panel
                                                                         .clone()
                                                                         .cached(fill_container()),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .id("history-file-panel-resize-handle")
+                                                                        .absolute()
+                                                                        .top_0()
+                                                                        .right(px(-3.))
+                                                                        .h_full()
+                                                                        .w(px(6.))
+                                                                        .when(!overlays_active, |el| {
+                                                                            el.cursor_col_resize()
+                                                                                .hover(|s| {
+                                                                                    s.bg(gpui::Hsla {
+                                                                                        a: 0.6,
+                                                                                        ..colors.border_focused
+                                                                                    })
+                                                                                })
+                                                                                .on_drag(
+                                                                                    HistoryFilePanelResize,
+                                                                                    |val, _, _, cx| {
+                                                                                        cx.stop_propagation();
+                                                                                        cx.new(|_| val.clone())
+                                                                                    },
+                                                                                )
+                                                                                .on_mouse_down(
+                                                                                    MouseButton::Left,
+                                                                                    |_: &MouseDownEvent, _, cx| {
+                                                                                        cx.stop_propagation();
+                                                                                    },
+                                                                                )
+                                                                        }),
                                                                 ),
                                                         )
                                                     },
@@ -1192,8 +1244,10 @@ impl Render for Workspace {
                                         div()
                                             .id("right-tab-details")
                                             .h_flex()
+                                            .flex_1()
                                             .h_full()
                                             .px(px(10.))
+                                            .justify_center()
                                             .items_center()
                                             .cursor_pointer()
                                             .when(is_details, |el| {
@@ -1222,8 +1276,10 @@ impl Render for Workspace {
                                         div()
                                             .id("right-tab-history")
                                             .h_flex()
+                                            .flex_1()
                                             .h_full()
                                             .px(px(10.))
+                                            .justify_center()
                                             .items_center()
                                             .cursor_pointer()
                                             .when(is_history, |el| {
@@ -2046,6 +2102,8 @@ impl Workspace {
             settings.settings_mut().layout.detail_panel_width = self.layout.detail_panel_width;
             settings.settings_mut().layout.diff_viewer_height = self.layout.diff_viewer_height;
             settings.settings_mut().layout.commit_input_height = self.layout.commit_input_height;
+            settings.settings_mut().layout.history_file_panel_width =
+                self.layout.history_file_panel_width;
             settings.settings_mut().layout.graph_hidden = self.layout.graph_hidden;
             if let Err(e) = settings.save() {
                 log::error!("Failed to save layout: {}", e);

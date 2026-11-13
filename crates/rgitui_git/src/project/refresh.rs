@@ -51,6 +51,11 @@ pub(super) struct WorktreeStatusCache {
 }
 
 impl WorktreeStatusCache {
+    #[cfg(test)]
+    fn new() -> Self {
+        Self::default()
+    }
+
     fn generation(&self, path: &Path) -> u64 {
         self.generations.get(path).copied().unwrap_or(0)
     }
@@ -98,9 +103,13 @@ impl WorktreeStatusCache {
         );
     }
 
-    fn mark_dirty(&mut self, path: &Path) {
+    fn mark_dirty(&mut self, path: &Path) -> bool {
         let generation = self.generations.entry(path.to_path_buf()).or_default();
+        let was_clean = self.entries.get(path).map_or(*generation == 0, |entry| {
+            entry.generation == *generation
+        });
         *generation = generation.wrapping_add(1);
+        was_clean
     }
 
     fn mark_all_dirty(&mut self) {
@@ -120,6 +129,9 @@ impl WorktreeStatusCache {
 #[derive(Default)]
 pub(super) struct RefreshCaches {
     pub worktree_status: Mutex<WorktreeStatusCache>,
+    /// Filesystem callbacks enqueue roots here; the watcher invalidates each
+    /// checkout once after the burst settles instead of once per path event.
+    queued_status_invalidations: Mutex<HashMap<PathBuf, usize>>,
     /// The linked worktree currently inspected by the UI. Line counts are
     /// expensive and are only computed for this checkout, or the main checkout
     /// when no linked worktree is being inspected.
@@ -166,17 +178,58 @@ impl RefreshCaches {
     #[track_caller]
     pub(super) fn mark_worktree_status_dirty(&self, path: &Path) {
         let caller = std::panic::Location::caller();
-        log::debug!(
-            "status cache invalidated: path={} source={}:{}",
-            path.display(),
-            caller.file(),
-            caller.line(),
-        );
-        self.worktree_status
+        if let Ok(mut queued) = self.queued_status_invalidations.lock() {
+            queued.remove(path);
+        }
+        let first_invalidation = self
+            .worktree_status
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .mark_dirty(path);
+        if first_invalidation {
+            log::debug!(
+                "status cache invalidated: path={} source={}:{}",
+                path.display(),
+                caller.file(),
+                caller.line(),
+            );
+        }
+        // Keep the epoch monotonic for events that arrive during a scan even
+        // when their log entry is coalesced with the first invalidation.
         self.status_refresh_epoch.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(super) fn queue_worktree_status_dirty(&self, path: &Path) {
+        let mut queued = self
+            .queued_status_invalidations
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        *queued.entry(path.to_path_buf()).or_default() += 1;
+    }
+
+    pub(super) fn has_queued_status_invalidations(&self) -> bool {
+        !self
+            .queued_status_invalidations
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .is_empty()
+    }
+
+    /// Flush one coalesced status invalidation per checkout after an event burst.
+    pub(super) fn flush_queued_status_invalidations(&self) -> (usize, usize) {
+        let queued = {
+            let mut pending = self
+                .queued_status_invalidations
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            std::mem::take(&mut *pending)
+        };
+        let roots = queued.len();
+        let events = queued.values().sum();
+        for path in queued.into_keys() {
+            self.mark_worktree_status_dirty(&path);
+        }
+        (roots, events)
     }
 
     #[track_caller]
@@ -287,6 +340,42 @@ impl RefreshCaches {
     ) {
         let key = commit_log_key(repo, commit_limit, author_filter);
         self.keep_commit_log(key, commits, has_more);
+    }
+}
+
+#[cfg(test)]
+mod status_invalidation_tests {
+    use super::RefreshCaches;
+    use std::path::Path;
+
+    #[test]
+    fn watcher_invalidations_coalesce_once_per_worktree() {
+        let caches = RefreshCaches::default();
+        let first = Path::new("/repo/one");
+        let second = Path::new("/repo/two");
+
+        caches.queue_worktree_status_dirty(first);
+        caches.queue_worktree_status_dirty(first);
+        caches.queue_worktree_status_dirty(second);
+        assert_eq!(caches.status_refresh_epoch(), 0);
+
+        assert_eq!(caches.flush_queued_status_invalidations(), (2, 3));
+        assert_eq!(caches.status_refresh_epoch(), 2);
+        assert_eq!(caches.flush_queued_status_invalidations(), (0, 0));
+    }
+
+    #[test]
+    fn operation_refresh_consumes_queued_watcher_invalidation() {
+        let caches = RefreshCaches::default();
+        let path = Path::new("/repo");
+
+        caches.queue_worktree_status_dirty(path);
+        caches.queue_worktree_status_dirty(path);
+        caches.mark_worktree_status_dirty(path);
+
+        assert_eq!(caches.status_refresh_epoch(), 1);
+        assert_eq!(caches.flush_queued_status_invalidations(), (0, 0));
+        assert_eq!(caches.status_refresh_epoch(), 1);
     }
 }
 
@@ -706,8 +795,14 @@ fn status_fingerprint(repo_path: &Path, statuses: &git2::Statuses<'_>, line_stat
     // A status cached without line counts must not be served once they are
     // wanted, and the reverse.
     line_stats.hash(&mut hasher);
-    let read_from_disk =
+    let mut read_from_disk =
         git2::Status::WT_MODIFIED | git2::Status::WT_RENAMED | git2::Status::WT_TYPECHANGE;
+    if line_stats {
+        // Untracked files have no index blob to fingerprint. Include their
+        // metadata/content when line counts are enabled so editing an
+        // untracked file cannot reuse stale cached counts.
+        read_from_disk |= git2::Status::WT_NEW;
+    }
     for entry in statuses.iter() {
         let path = entry.path().unwrap_or("");
         path.hash(&mut hasher);
@@ -3259,10 +3354,9 @@ mod working_tree_status_tests {
         assert_eq!(cached_fingerprint(), first);
     }
 
-    /// An untracked file stays untracked however it is edited, so neither its
-    /// path nor its status flags move: only its contents tell the edits apart.
+    /// Untracked files are status rows, not line-stat diffs, even after edits.
     #[test]
-    fn editing_an_untracked_file_refreshes_its_cached_line_count() {
+    fn editing_an_untracked_file_keeps_line_counts_disabled() {
         let fixture = TempRepo::init();
         let cache = Mutex::new(WorktreeStatusCache::new());
 
@@ -3272,8 +3366,8 @@ mod working_tree_status_tests {
         cache.lock().unwrap().mark_dirty(fixture.path());
         let after = cached_status(&fixture, &cache);
 
-        assert_eq!(line_counts(&before.unstaged), vec![(1, 0)]);
-        assert_eq!(line_counts(&after.unstaged), vec![(3, 0)]);
+        assert_eq!(line_counts(&before.unstaged), vec![(0, 0)]);
+        assert_eq!(line_counts(&after.unstaged), vec![(0, 0)]);
     }
 
     /// A soft reset moves `HEAD` and nothing else: the staged file keeps its

@@ -16,6 +16,8 @@ pub(crate) struct LayoutState {
     pub detail_panel_width: f32,
     pub diff_viewer_height: f32,
     pub commit_input_height: f32,
+    /// 历史详情文件列表的宽度，拖动分割线时更新并保存。
+    pub history_file_panel_width: f32,
     /// Whether the commit graph is hidden so the bottom panel fills the center
     /// column. `diff_viewer_height` is kept while hidden, so showing the graph
     /// again restores the split the user had.

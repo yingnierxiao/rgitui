@@ -405,7 +405,7 @@ impl GitProject {
                                     .map(|repos| repos.roots())
                                     .unwrap_or_else(|_| vec![callback_main_root.clone()]);
                                 for root in roots {
-                                    callback_status_cache.mark_worktree_status_dirty(&root);
+                                    callback_status_cache.queue_worktree_status_dirty(&root);
                                 }
                                 dirty_flag.store(true, Ordering::Relaxed);
                                 log::debug!("watcher: Git config/ignore metadata changed");
@@ -462,10 +462,10 @@ impl GitProject {
                                     // Unknown paths are conservatively attributed
                                     // to the main checkout rather than dropped.
                                     callback_status_cache
-                                        .mark_worktree_status_dirty(&callback_main_root);
+                                        .queue_worktree_status_dirty(&callback_main_root);
                                 } else {
                                     for root in dirty_roots {
-                                        callback_status_cache.mark_worktree_status_dirty(&root);
+                                        callback_status_cache.queue_worktree_status_dirty(&root);
                                     }
                                 }
                                 dirty_flag.store(true, Ordering::Relaxed);
@@ -711,6 +711,7 @@ impl GitProject {
                     // may already have applied a snapshot that covers these events.
                     if dirty.load(Ordering::Relaxed)
                         && !worktree_cache.has_unapplied_status_refresh()
+                        && !worktree_cache.has_queued_status_invalidations()
                     {
                         dirty.store(false, Ordering::Relaxed);
                     }
@@ -723,20 +724,20 @@ impl GitProject {
                     }
 
                     if dirty.swap(false, Ordering::Relaxed) {
-                        // Wait until events stop arriving for 300ms (maximum
-                        // 1.2s), rather than refreshing for each 200ms chunk of
-                        // one large checkout/Unity import burst.
+                        // Wait for 450ms of quiet, allowing up to 3.6s for a
+                        // large checkout or Unity import to settle before
+                        // another expensive repository status scan.
                         let debounce_started = std::time::Instant::now();
                         let mut last_count = worktree_event_count.load(Ordering::Relaxed)
                             + git_event_count.load(Ordering::Relaxed);
                         let mut quiet_ticks = 0;
-                        for _ in 0..8 {
+                        for _ in 0..24 {
                             smol::Timer::after(Duration::from_millis(150)).await;
                             let count = worktree_event_count.load(Ordering::Relaxed)
                                 + git_event_count.load(Ordering::Relaxed);
                             if count == last_count {
                                 quiet_ticks += 1;
-                                if quiet_ticks >= 2 {
+                                if quiet_ticks >= 3 {
                                     break;
                                 }
                             } else {
@@ -750,12 +751,16 @@ impl GitProject {
                         dirty.swap(false, Ordering::Relaxed);
                         let worktree_events = worktree_event_count.swap(0, Ordering::Relaxed);
                         let git_events = git_event_count.swap(0, Ordering::Relaxed);
+                        let (invalidated_roots, coalesced_events) =
+                            worktree_cache.flush_queued_status_invalidations();
                         accepted_event_log_samples.store(0, Ordering::Relaxed);
                         log::info!(
-                            "watcher refresh trigger: worktree={} file_events={} git_events={} debounce={:?} status_epoch={} commits={}",
+                            "watcher refresh trigger: worktree={} file_events={} git_events={} invalidated_roots={} coalesced_events={} debounce={:?} status_epoch={} commits={}",
                             repo_path.display(),
                             worktree_events,
                             git_events,
+                            invalidated_roots,
+                            coalesced_events,
                             debounce_started.elapsed(),
                             worktree_cache.status_refresh_epoch(),
                             effective_limit

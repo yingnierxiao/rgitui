@@ -410,6 +410,7 @@ impl Workspace {
             CommandId::NextTab => {
                 if !self.tabs.is_empty() {
                     self.active_tab = (self.active_tab + 1) % self.tabs.len();
+                    self.persist_workspace_snapshot(cx);
                     cx.notify();
                 }
             }
@@ -420,6 +421,7 @@ impl Workspace {
                     } else {
                         self.active_tab - 1
                     };
+                    self.persist_workspace_snapshot(cx);
                     cx.notify();
                 }
             }

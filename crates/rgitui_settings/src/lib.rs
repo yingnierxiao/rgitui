@@ -296,7 +296,7 @@ pub struct SavedWindowBounds {
 }
 
 /// Current settings version. Increment when making breaking changes.
-const CURRENT_SETTINGS_VERSION: u32 = 3;
+const CURRENT_SETTINGS_VERSION: u32 = 5;
 
 fn default_settings_version() -> u32 {
     CURRENT_SETTINGS_VERSION
@@ -330,11 +330,11 @@ fn default_show_subject_column() -> bool {
 }
 
 fn default_author_column_width() -> f32 {
-    140.0
+    90.0
 }
 
 fn default_date_column_width() -> f32 {
-    100.0
+    72.0
 }
 
 /// Room for twelve lanes, matching the graph column's own sizing: one lane of
@@ -383,6 +383,9 @@ pub struct LayoutSettings {
     pub diff_viewer_height: f32,
     #[serde(default = "default_commit_input_height")]
     pub commit_input_height: f32,
+    /// 历史详情文件列表与差异视图之间的宽度。
+    #[serde(default = "default_history_file_panel_width")]
+    pub history_file_panel_width: f32,
     /// Whether the commit graph is hidden, handing its space to the bottom
     /// panel. Files written before the option existed load with it off.
     #[serde(default)]
@@ -406,6 +409,10 @@ fn default_commit_input_height() -> f32 {
     300.0
 }
 
+fn default_history_file_panel_width() -> f32 {
+    320.0
+}
+
 impl Default for LayoutSettings {
     fn default() -> Self {
         Self {
@@ -413,6 +420,7 @@ impl Default for LayoutSettings {
             detail_panel_width: default_detail_panel_width(),
             diff_viewer_height: default_diff_viewer_height(),
             commit_input_height: default_commit_input_height(),
+            history_file_panel_width: default_history_file_panel_width(),
             graph_hidden: false,
         }
     }
@@ -1098,6 +1106,34 @@ impl SettingsState {
             self.settings.version = 3;
             migrated = true;
             log::info!("Migrated settings from version 2 to 3");
+        }
+
+        // Migration 3 -> 4: make the history message column roomier while
+        // preserving widths that the user has already resized manually.
+        if self.settings.version == 3 {
+            if self.settings.author_column_width == 140.0 {
+                self.settings.author_column_width = default_author_column_width();
+            }
+            if self.settings.date_column_width == 100.0 {
+                self.settings.date_column_width = default_date_column_width();
+            }
+            self.settings.version = 4;
+            migrated = true;
+            log::info!("Migrated settings from version 3 to 4");
+        }
+
+        // Migration 4 -> 5: tighten the new defaults once more. Preserve a
+        // width that was changed explicitly in the settings UI.
+        if self.settings.version == 4 {
+            if self.settings.author_column_width == 116.0 {
+                self.settings.author_column_width = default_author_column_width();
+            }
+            if self.settings.date_column_width == 84.0 {
+                self.settings.date_column_width = default_date_column_width();
+            }
+            self.settings.version = 5;
+            migrated = true;
+            log::info!("Migrated settings from version 4 to 5");
         }
 
         // Ensure version is current
@@ -1991,6 +2027,26 @@ mod tests {
         state.migrate_settings();
 
         assert_eq!(state.settings.ai.model, "gemini-2.5-pro");
+    }
+
+    #[test]
+    fn v3_layout_migration_only_changes_legacy_column_defaults() {
+        let mut state = test_settings_state();
+        state.settings.version = 3;
+        state.settings.author_column_width = 140.0;
+        state.settings.date_column_width = 100.0;
+
+        assert!(state.migrate_settings());
+        assert_eq!(state.settings.author_column_width, 90.0);
+        assert_eq!(state.settings.date_column_width, 72.0);
+
+        let mut customized = test_settings_state();
+        customized.settings.version = 3;
+        customized.settings.author_column_width = 200.0;
+        customized.settings.date_column_width = 120.0;
+        customized.migrate_settings();
+        assert_eq!(customized.settings.author_column_width, 200.0);
+        assert_eq!(customized.settings.date_column_width, 120.0);
     }
 
     #[test]

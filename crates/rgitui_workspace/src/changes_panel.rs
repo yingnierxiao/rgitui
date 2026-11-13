@@ -351,8 +351,9 @@ fn checkbox_target_paths(
     visible: &[usize],
     selected: &HashSet<PathBuf>,
     clicked: &Path,
+    extend: bool,
 ) -> Vec<PathBuf> {
-    if selected.len() > 1 && selected.contains(clicked) {
+    if extend && selected.len() > 1 && selected.contains(clicked) {
         selected_virtual_paths(rows, visible, selected)
     } else {
         vec![clicked.to_path_buf()]
@@ -379,15 +380,23 @@ fn discard_target_paths(
     rows: &[ChangeRow],
     visible: &[usize],
     selected: &HashSet<PathBuf>,
+    overrides: &HashMap<PathBuf, CheckState>,
     clicked: &Path,
 ) -> Vec<PathBuf> {
     let highlighted = selected.contains(clicked);
+    let checkbox_selected = !highlighted
+        && rows
+            .iter()
+            .find(|row| row.path == clicked)
+            .is_some_and(|row| visual_state(row, overrides) != CheckState::Unchecked);
     let candidates = visible
         .iter()
         .filter_map(|index| rows.get(*index))
         .filter(|row| {
             if highlighted {
                 selected.contains(&row.path)
+            } else if checkbox_selected {
+                visual_state(row, overrides) != CheckState::Unchecked
             } else {
                 row.path == clicked
             }
@@ -829,6 +838,17 @@ impl ChangesPanel {
             .map(|row| row.path.clone())
             .collect::<Vec<_>>();
         self.set_virtual_paths(&paths, desired, cx);
+
+        let mut selected = self.selected_paths.as_ref().clone();
+        if desired == CheckState::Checked {
+            selected.extend(paths.iter().cloned());
+        } else {
+            for path in &paths {
+                selected.remove(path);
+            }
+        }
+        self.selected_paths = Arc::new(selected);
+        cx.notify();
     }
 
     fn visible_index_for_path(&self, hint: usize, path: &Path) -> Option<usize> {
@@ -898,7 +918,9 @@ impl ChangesPanel {
         let index = self.visible[row_number];
         let path = self.rows[index].path.clone();
         if extend || !self.selected_paths.contains(&path) {
-            self.select_visible_row(row_number, extend, false, cx);
+            // Checkbox selection also drives the blue row highlight. Preserve
+            // existing highlighted rows so files can be selected one by one.
+            self.select_visible_row(row_number, extend, true, cx);
         }
         let row = &self.rows[index];
         if row.has_conflict() {
@@ -914,19 +936,21 @@ impl ChangesPanel {
             &self.visible,
             &self.selected_paths,
             &path,
+            extend,
         );
         self.set_virtual_paths(&paths, target, cx);
 
-        // A group checkbox click is a one-shot batch action. Keeping multiple
-        // rows armed makes the very next rapid click reverse the entire group
-        // again, which looks like all checkboxes randomly became unchecked.
-        if paths.len() > 1 {
-            self.selected_paths = Arc::new(HashSet::from([path.clone()]));
-            self.selection_anchor = Some(path.clone());
-            self.selected_path = Some(path);
-            self.selected_row = Some(row_number);
-            cx.notify();
+        let mut selected = self.selected_paths.as_ref().clone();
+        if target == CheckState::Checked {
+            selected.extend(paths.iter().cloned());
+        } else {
+            for path in &paths {
+                selected.remove(path);
+            }
         }
+        self.selected_paths = Arc::new(selected);
+        cx.notify();
+
     }
 
     fn select_all_visible(&mut self, cx: &mut Context<Self>) {
@@ -1016,7 +1040,6 @@ impl Render for ChangesPanel {
             t!("changes.sort.path")
         };
         let staged_only = self.only_staged;
-        let filtered_count = self.visible.len();
 
         let list = uniform_list(
             "changes-flat-list",
@@ -1281,56 +1304,6 @@ impl Render for ChangesPanel {
             .child(bounds_tracker)
             .child(
                 div()
-                    .h_flex()
-                    .w_full()
-                    .h(px(34.))
-                    .px(px(8.))
-                    .gap(px(8.))
-                    .items_center()
-                    .bg(colors.toolbar_background)
-                    .border_b_1()
-                    .border_color(colors.border_variant)
-                    .child(
-                        Checkbox::new("changes-check-all", header_state)
-                            .disabled(!has_selectable_rows)
-                            .on_click(move |_, _, cx| {
-                                cx.stop_propagation();
-                                panel_header
-                                    .update(cx, |this, cx| this.toggle_all_visible(cx))
-                                    .ok();
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id("changes-select-all-label")
-                            .cursor_pointer()
-                            .when(!has_selectable_rows, |el| el.opacity(0.5))
-                            .on_click(move |_, _, cx| {
-                                cx.stop_propagation();
-                                panel_select_all_label
-                                    .update(cx, |this, cx| this.toggle_all_visible(cx))
-                                    .ok();
-                            })
-                            .child(
-                                Label::new(t!("changes.select_all"))
-                                    .size(LabelSize::Small)
-                                    .color(Color::Default),
-                            ),
-                    )
-                    .child(
-                        Label::new(tp!("changes.header", file_count))
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        Label::new(format!("{staged_count}/{file_count}"))
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    ),
-            )
-            .child(
-                div()
                     .w_full()
                     .h(px(36.))
                     .px(px(8.))
@@ -1387,9 +1360,54 @@ impl Render for ChangesPanel {
                                     .ok();
                             }),
                     )
+                    .child(div().flex_1()),
+            )
+            .child(
+                div()
+                    .h_flex()
+                    .w_full()
+                    .h(px(34.))
+                    .px(px(8.))
+                    .gap(px(8.))
+                    .items_center()
+                    .bg(colors.toolbar_background)
+                    .border_b_1()
+                    .border_color(colors.border_variant)
+                    .child(
+                        Checkbox::new("changes-check-all", header_state)
+                            .disabled(!has_selectable_rows)
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                panel_header
+                                    .update(cx, |this, cx| this.toggle_all_visible(cx))
+                                    .ok();
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("changes-select-all-label")
+                            .cursor_pointer()
+                            .when(!has_selectable_rows, |el| el.opacity(0.5))
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                panel_select_all_label
+                                    .update(cx, |this, cx| this.toggle_all_visible(cx))
+                                    .ok();
+                            })
+                            .child(
+                                Label::new(t!("changes.select_all"))
+                                    .size(LabelSize::Small)
+                                    .color(Color::Default),
+                            ),
+                    )
+                    .child(
+                        Label::new(tp!("changes.header", file_count))
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
                     .child(div().flex_1())
                     .child(
-                        Label::new(format!("{filtered_count}"))
+                        Label::new(format!("{staged_count}/{file_count}"))
                             .size(LabelSize::XSmall)
                             .color(Color::Muted),
                     ),
@@ -1433,6 +1451,7 @@ impl Render for ChangesPanel {
                         &self.rows,
                         &self.visible,
                         &self.selected_paths,
+                        &self.overrides,
                         &row.path,
                     )
                     .is_empty()
@@ -1632,6 +1651,7 @@ impl Render for ChangesPanel {
                             &self.rows,
                             &self.visible,
                             &self.selected_paths,
+                            &self.overrides,
                             &row.path,
                         );
                         if !paths.is_empty() {
@@ -1828,14 +1848,12 @@ mod tests {
         );
         let visible = vec![0, 1, 2];
         let multi = HashSet::from([PathBuf::from("a.rs"), PathBuf::from("b.rs")]);
-        let first = checkbox_target_paths(&rows, &visible, &multi, Path::new("a.rs"));
+        let first = checkbox_target_paths(&rows, &visible, &multi, Path::new("a.rs"), true);
         assert_eq!(first, vec![PathBuf::from("a.rs"), PathBuf::from("b.rs")]);
-        // The checkbox handler collapses selection to the clicked file after
-        // batching. The next quick click cannot reverse all files at once.
         let single = HashSet::from([PathBuf::from("a.rs")]);
-        let second = checkbox_target_paths(&rows, &visible, &single, Path::new("b.rs"));
+        let second = checkbox_target_paths(&rows, &visible, &single, Path::new("b.rs"), false);
         assert_eq!(second, vec![PathBuf::from("b.rs")]);
-        let third = checkbox_target_paths(&rows, &visible, &single, Path::new("a.rs"));
+        let third = checkbox_target_paths(&rows, &visible, &single, Path::new("a.rs"), false);
         assert_eq!(third, vec![PathBuf::from("a.rs")]);
     }
 
@@ -2024,20 +2042,67 @@ mod tests {
         ];
         let visible = vec![0, 1, 2];
         let selected = HashSet::from([PathBuf::from("a.rs"), PathBuf::from("b.rs")]);
+        let overrides = HashMap::new();
         assert_eq!(
-            discard_target_paths(&rows, &visible, &selected, Path::new("a.rs")),
+            discard_target_paths(
+                &rows,
+                &visible,
+                &selected,
+                &overrides,
+                Path::new("a.rs"),
+            ),
             vec![PathBuf::from("a.rs"), PathBuf::from("b.rs")]
         );
-        assert!(discard_target_paths(&rows, &visible, &selected, Path::new("c.rs"))
-            .is_empty());
+        assert!(discard_target_paths(
+            &rows,
+            &visible,
+            &selected,
+            &overrides,
+            Path::new("c.rs")
+        )
+        .is_empty());
         let unsafe_selection = HashSet::from([PathBuf::from("a.rs"), PathBuf::from("c.rs")]);
         assert!(discard_target_paths(
             &rows,
             &visible,
             &unsafe_selection,
+            &overrides,
             Path::new("a.rs"),
         )
         .is_empty());
+    }
+
+    #[test]
+    fn batch_discard_uses_checked_rows_when_no_rows_are_highlighted() {
+        let rows = vec![
+            ChangeRow {
+                path: PathBuf::from("a.rs"),
+                staged: None,
+                unstaged: Some(file("a.rs", FileChangeKind::Modified)),
+            },
+            ChangeRow {
+                path: PathBuf::from("b.rs"),
+                staged: None,
+                unstaged: Some(file("b.rs", FileChangeKind::Modified)),
+            },
+        ];
+        let visible = vec![0, 1];
+        let selected = HashSet::new();
+        let overrides = HashMap::from([
+            (PathBuf::from("a.rs"), CheckState::Checked),
+            (PathBuf::from("b.rs"), CheckState::Checked),
+        ]);
+
+        assert_eq!(
+            discard_target_paths(
+                &rows,
+                &visible,
+                &selected,
+                &overrides,
+                Path::new("a.rs"),
+            ),
+            vec![PathBuf::from("a.rs"), PathBuf::from("b.rs")]
+        );
     }
 
     #[test]

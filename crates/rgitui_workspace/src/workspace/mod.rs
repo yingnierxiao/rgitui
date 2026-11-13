@@ -54,6 +54,14 @@ impl Render for DiffViewerResize {
 }
 
 #[derive(Clone)]
+pub(super) struct HistoryFilePanelResize;
+impl Render for HistoryFilePanelResize {
+    fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+#[derive(Clone)]
 pub(super) struct CommitInputResize;
 impl Render for CommitInputResize {
     fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -464,6 +472,7 @@ impl Workspace {
         let detail_panel_width = layout_settings.detail_panel_width;
         let diff_viewer_height = layout_settings.diff_viewer_height;
         let commit_input_height = layout_settings.commit_input_height.max(300.0);
+        let history_file_panel_width = layout_settings.history_file_panel_width;
 
         Self {
             tabs: Vec::new(),
@@ -475,6 +484,7 @@ impl Workspace {
                 detail_panel_width,
                 diff_viewer_height,
                 commit_input_height,
+                history_file_panel_width,
                 graph_hidden: layout_settings.graph_hidden,
                 content_bounds: Bounds::default(),
                 right_panel_bounds: Bounds::default(),

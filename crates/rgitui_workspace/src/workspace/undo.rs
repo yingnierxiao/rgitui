@@ -210,6 +210,7 @@ impl Workspace {
         };
         // Surface the result in the tab it applies to.
         self.active_tab = tab_index;
+        self.persist_workspace_snapshot(cx);
         self.update_command_context(cx);
         let project = self.tabs[tab_index].project.clone();
         let worktree_path = undo.worktree_path.clone();

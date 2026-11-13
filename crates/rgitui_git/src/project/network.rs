@@ -9,7 +9,7 @@ use crate::types::*;
 
 use super::argsafe::{validate_branch_name, validate_remote_name};
 use super::auth::run_git_network_command;
-use super::refresh::{gather_refresh_data, gather_refresh_data_lightweight_cached};
+use super::refresh::gather_refresh_data;
 use super::{
     head_branch_name, pull_target, push_target, GitProject, GitProjectEvent, RefreshData,
 };
@@ -35,7 +35,9 @@ fn is_pull_blocked_by_local_edits(error: &str) -> bool {
 }
 
 /// Attempt to recover a normal rejected push by incorporating the exact
-/// destination ref. Never force push and never silently overwrite user changes.
+/// destination ref. Local edits are temporarily stashed by Git while pulling,
+/// then restored before the retry. Never force push or silently overwrite user
+/// changes; Git reports a real merge or stash-apply conflict to the caller.
 ///
 /// A merge (rather than rebase) preserves local commit IDs and matches the
 /// GitHub Desktop-style "pull then push" behavior. Git can fail if a conflict
@@ -93,25 +95,33 @@ fn push_with_auto_pull(
                 .include_untracked(false)
                 .include_ignored(false)
                 .include_unmodified(false);
-            if !repo.statuses(Some(&mut options))?.is_empty() {
-                anyhow::bail!(
-                    "Remote {remote}/{remote_branch} has new commits, but this checkout has \
-                     uncommitted changes. Commit or stash them before retrying Push."
-                );
-            }
+            let has_local_changes = !repo.statuses(Some(&mut options))?.is_empty();
             log::info!(
-                "push timing: automatic pull preflight completed in {:?} worktree={}",
+                "push timing: automatic pull preflight completed in {:?} worktree={} autostash={}",
                 check_started.elapsed(),
-                worktree.display()
+                worktree.display(),
+                has_local_changes,
             );
             drop(repo);
             // Set before pulling: a merge conflict may modify HEAD, the index
             // or the worktree even when the Git command returns an error.
             *pulled = true;
             let pull_started = std::time::Instant::now();
+            let pull_args = if has_local_changes {
+                vec![
+                    "pull",
+                    "--autostash",
+                    "--no-rebase",
+                    "--no-edit",
+                    remote,
+                    remote_branch,
+                ]
+            } else {
+                vec!["pull", "--no-rebase", "--no-edit", remote, remote_branch]
+            };
             let pull_result = run_git_network_command(
                 worktree,
-                &["pull", "--no-rebase", "--no-edit", remote, remote_branch],
+                &pull_args,
             );
             log::info!(
                 "push timing: automatic pull completed in {:?} result={} remote={} branch={}",
@@ -189,8 +199,13 @@ fn push_with_auto_pull(
                 remote,
                 remote_branch
             );
-            let auto_pull_detail =
-                format!("Automatically pulled {remote}/{remote_branch} before pushing.");
+            let auto_pull_detail = if has_local_changes {
+                format!(
+                    "Automatically pulled {remote}/{remote_branch} and restored local changes before pushing."
+                )
+            } else {
+                format!("Automatically pulled {remote}/{remote_branch} before pushing.")
+            };
             Ok(Some(match details {
                 Some(details) => format!("{auto_pull_detail}\n{details}"),
                 None => auto_pull_detail,
@@ -262,6 +277,23 @@ mod pull_arguments_tests {
 }
 
 impl GitProject {
+    /// Apply the post-network snapshot without keeping the user-facing Git
+    /// operation in its running state. Keep the watcher gated until refresh
+    /// completes so it cannot start a competing scan of the same checkout.
+    fn refresh_after_network_operation(&mut self, cx: &mut Context<Self>) {
+        let caches = self.refresh_caches.clone();
+        caches.begin_operation();
+        let refresh = self.refresh(cx);
+        cx.spawn(async move |_this: WeakEntity<Self>, _cx: &mut AsyncApp| {
+            let result = refresh.await;
+            caches.finish_operation();
+            if let Err(error) = result {
+                log::error!("Post-network repository refresh failed: {}", error);
+            }
+        })
+        .detach();
+    }
+
     pub fn fetch_default_at(
         &mut self,
         worktree_path: &Path,
@@ -506,13 +538,7 @@ impl GitProject {
         let task_remote_name = remote_name.clone();
         let task_branch_name = branch_name.clone();
         let task_worktree_path = worktree_path.to_path_buf();
-        let repo_path = self.repo_path.clone();
-        let commit_limit = super::refresh::effective_refresh_commit_limit(
-            self.commit_limit,
-            self.loaded_commit_count(),
-        );
         let refresh_caches = self.refresh_caches.clone();
-        let author_filter = self.commit_author_filter.clone();
         let operation_id = self.begin_operation(
             GitOperationKind::Pull,
             msg!(
@@ -526,7 +552,7 @@ impl GitProject {
         );
         self.note_operation_worktree(operation_id, worktree_path);
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let result: anyhow::Result<(Message, bool, Option<String>, bool, RefreshData)> = cx
+            let result: anyhow::Result<(Message, bool, Option<String>, bool)> = cx
                 .background_executor()
                 .spawn(async move {
                     let operation_started = std::time::Instant::now();
@@ -626,37 +652,20 @@ impl GitProject {
                             "pull status cache preserved: already up to date and autostash disabled"
                         );
                     }
-                    let refresh_started = std::time::Instant::now();
-                    let refresh_result = gather_refresh_data_lightweight_cached(
-                        &repo_path,
-                        commit_limit,
-                        &refresh_caches,
-                        author_filter.as_deref(),
-                    );
                     log::info!(
-                        "pull timing: lightweight repository refresh completed in {:?}",
-                        refresh_started.elapsed()
-                    );
-                    let data = refresh_result?;
-                    log::info!(
-                        "pull timing: background operation completed in {:?}",
+                        "pull timing: network operation completed in {:?}; refresh deferred",
                         operation_started.elapsed()
                     );
-                    Ok((msg, is_conflict, details, preserve_status_cache, data))
+                    Ok((msg, is_conflict, details, preserve_status_cache))
                 })
                 .await;
 
             cx.update(|cx| {
                 this.update(cx, |this, cx| {
                     match result {
-                        Ok((msg, is_conflict, details, _preserve_status_cache, data)) => {
-                            this.apply_refresh_data(data);
-                            if this.needs_graph_state_refresh() {
-                                // Keep the Pull completion path responsive; the
-                                // expensive branch graph state is filled in later.
-                                this.refresh_ahead_behind(cx);
-                            }
+                        Ok((msg, is_conflict, details, _preserve_status_cache)) => {
                             if is_conflict {
+                                this.refresh_after_network_operation(cx);
                                 this.fail_op(
                                     operation_id,
                                     GitOperationKind::Pull,
@@ -666,6 +675,7 @@ impl GitProject {
                                     cx,
                                 );
                             } else {
+                                this.refresh_after_network_operation(cx);
                                 this.complete_op(
                                     operation_id,
                                     GitOperationKind::Pull,
@@ -686,6 +696,10 @@ impl GitProject {
                             log::error!("Pull failed: {}", e);
                             let blocked_by_local_edits =
                                 is_pull_blocked_by_local_edits(&e.to_string());
+                            // A rejected Pull may still fetch refs before Git
+                            // refuses the merge, so reconcile them in the
+                            // background while keeping the watcher gated.
+                            this.refresh_after_network_operation(cx);
                             this.fail_op(
                                 operation_id,
                                 GitOperationKind::Pull,
@@ -702,11 +716,6 @@ impl GitProject {
                                 ),
                                 cx,
                             );
-                            // A rejected Pull may still fetch refs before Git
-                            // refuses the merge. Reconcile both the changed
-                            // remote refs and status of local edits in the UI.
-                            // This is read-only: never reset, pop or create a stash.
-                            this.refresh(cx).detach();
                         }
                     }
                     cx.notify();
@@ -776,13 +785,7 @@ impl GitProject {
         let task_remote_name = remote_name.clone();
         let task_remote_branch_name = remote_branch_name.clone();
         let task_worktree_path = worktree_path.to_path_buf();
-        let repo_path = self.repo_path.clone();
-        let commit_limit = super::refresh::effective_refresh_commit_limit(
-            self.commit_limit,
-            self.loaded_commit_count(),
-        );
         let refresh_caches = self.refresh_caches.clone();
-        let author_filter = self.commit_author_filter.clone();
         let kind = GitOperationKind::push(force);
         let operation_id = self.begin_operation(
             kind,
@@ -805,11 +808,11 @@ impl GitProject {
         );
         self.note_operation_worktree(operation_id, worktree_path);
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let (result, failure_refresh) = cx
+            let (result, pulled) = cx
                 .background_executor()
                 .spawn(async move {
                     let mut pulled = false;
-                    let result: anyhow::Result<(Message, Option<String>, RefreshData)> = (|| {
+                    let result: anyhow::Result<(Message, Option<String>)> = (|| {
                         let repo = Repository::open(&task_worktree_path)?;
                         let branch_name = head_branch_name(&repo)?;
                         drop(repo);
@@ -857,60 +860,28 @@ impl GitProject {
                                 remote_branch = &task_remote_branch_name
                             )
                         };
-                        let refresh_started = std::time::Instant::now();
-                        let data = if pulled {
+                        if pulled {
                             refresh_caches.mark_worktree_status_dirty(&task_worktree_path);
-                            gather_refresh_data_lightweight_cached(
-                                &repo_path,
-                                commit_limit,
-                                &refresh_caches,
-                                author_filter.as_deref(),
-                            )?
-                        } else {
-                            gather_refresh_data(&repo_path, commit_limit)?
-                        };
+                        }
                         log::info!(
-                            "push timing: post-operation refresh completed in {:?} auto_pulled={}",
-                            refresh_started.elapsed(),
+                            "push timing: network operation completed; refresh deferred auto_pulled={}",
                             pulled
                         );
-                        Ok((msg, details, data))
+                        Ok((msg, details))
                     })();
 
-                    // A failed automatic merge may have changed the working tree
-                    // and index. Refresh even on failure so conflict UI is live.
-                    let failure_refresh = if result.is_err() && pulled {
-                        let failure_started = std::time::Instant::now();
-                        refresh_caches.mark_worktree_status_dirty(&task_worktree_path);
-                        let refreshed = gather_refresh_data_lightweight_cached(
-                            &repo_path,
-                            commit_limit,
-                            &refresh_caches,
-                            author_filter.as_deref(),
-                        );
-                        log::info!(
-                            "push timing: refresh after failed auto-pull/retry completed in {:?} result={}",
-                            failure_started.elapsed(),
-                            if refreshed.is_ok() { "success" } else { "failed" }
-                        );
-                        refreshed.ok()
-                    } else {
-                        None
-                    };
-                    (result, failure_refresh)
+                    // A failed automatic merge may have changed the working
+                    // tree and index. Refresh after reporting the failure so
+                    // the conflict state remains visible without delaying it.
+                    (result, pulled)
                 })
                 .await;
 
             cx.update(|cx| {
                 this.update(cx, |this, cx| {
                     match result {
-                        Ok((msg, details, data)) => {
-                            this.apply_refresh_data(data);
-                            // An automatic pull can advance HEAD; update branch
-                            // graph state just as the explicit Pull path does.
-                            if this.needs_graph_state_refresh() {
-                                this.refresh_ahead_behind(cx);
-                            }
+                        Ok((msg, details)) => {
+                            this.refresh_after_network_operation(cx);
                             this.complete_op(
                                 operation_id,
                                 kind,
@@ -927,12 +898,8 @@ impl GitProject {
                             cx.emit(GitProjectEvent::RefsChanged);
                         }
                         Err(e) => {
-                            if let Some(data) = failure_refresh {
-                                this.apply_refresh_data(data);
-                                if this.needs_graph_state_refresh() {
-                                    this.refresh_ahead_behind(cx);
-                                }
-                                cx.emit(GitProjectEvent::RepositoryChanged);
+                            if pulled {
+                                this.refresh_after_network_operation(cx);
                             }
                             log::error!("Push failed: {}", e);
                             this.fail_op(
@@ -1080,7 +1047,10 @@ mod push_auto_pull_tests {
         let result = repos.push_with_recovery(&mut pulled).unwrap();
         assert!(pulled);
         assert!(result.unwrap().contains("Automatically pulled origin/dev"));
-        assert_eq!(git(&repos.local, &["rev-parse", "HEAD"]), repos.remote_head());
+        assert_eq!(
+            git(&repos.local, &["rev-parse", "HEAD"]),
+            repos.remote_head()
+        );
         let parents = git(&repos.local, &["show", "-s", "--format=%P", "HEAD"]);
         assert_eq!(parents.split_whitespace().count(), 2);
         assert!(parents.split_whitespace().any(|sha| sha == original_local_head));
@@ -1101,20 +1071,22 @@ mod push_auto_pull_tests {
     }
 
     #[test]
-    fn uncommitted_worktree_is_never_modified_by_automatic_pull() {
+    fn uncommitted_worktree_is_stashed_while_automatic_pull_merges() {
         let repos = TestRepos::new();
         repos.push_peer("peer.txt", "remote update\n");
         fs::write(repos.local.join("base.txt"), "unsaved local work\n").unwrap();
         let previous_head = git(&repos.local, &["rev-parse", "HEAD"]);
-        let remote_head = repos.remote_head();
         let mut pulled = false;
-        let error = repos.push_with_recovery(&mut pulled).unwrap_err();
-        assert!(error.to_string().contains("Commit or stash"));
-        assert!(!pulled);
-        assert_eq!(git(&repos.local, &["rev-parse", "HEAD"]), previous_head);
-        assert_eq!(repos.remote_head(), remote_head);
+        let result = repos.push_with_recovery(&mut pulled).unwrap();
+        assert!(pulled);
+        assert!(result.unwrap().contains("restored local changes"));
+        assert_eq!(git(&repos.local, &["rev-parse", "HEAD"]), repos.remote_head());
+        assert_ne!(git(&repos.local, &["rev-parse", "HEAD"]), previous_head);
+        assert!(repos.local.join("peer.txt").exists());
         assert_eq!(
-            fs::read_to_string(repos.local.join("base.txt")).unwrap(),
+            fs::read_to_string(repos.local.join("base.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
             "unsaved local work\n"
         );
     }

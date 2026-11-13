@@ -449,6 +449,7 @@ impl Workspace {
             detail_panel_width: self.layout.detail_panel_width,
             diff_viewer_height: self.layout.diff_viewer_height,
             commit_input_height: self.layout.commit_input_height,
+            history_file_panel_width: self.layout.history_file_panel_width,
             graph_hidden: self.layout.graph_hidden,
         }
     }
@@ -458,6 +459,7 @@ impl Workspace {
         self.layout.detail_panel_width = layout.detail_panel_width;
         self.layout.diff_viewer_height = layout.diff_viewer_height;
         self.layout.commit_input_height = layout.commit_input_height.max(300.0);
+        self.layout.history_file_panel_width = layout.history_file_panel_width;
         self.layout.graph_hidden = layout.graph_hidden;
     }
 
