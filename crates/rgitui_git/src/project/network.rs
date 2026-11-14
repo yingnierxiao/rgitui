@@ -3,7 +3,10 @@ use anyhow::{Context as _, Result};
 use git2::{Repository, RepositoryState, StatusOptions};
 use gpui::{AsyncApp, Context, Task, WeakEntity};
 use rgitui_i18n::{msg, msgp, Message};
+use rgitui_settings::SettingsState;
+use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::types::*;
 
@@ -29,6 +32,139 @@ fn is_remote_ahead_rejection(error: &str) -> bool {
         && message.contains("failed to update ref")
         && message.contains(" but expected ");
     normal_non_fast_forward || concurrent_remote_update
+}
+
+fn network_lock(worktree: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<BTreeMap<std::path::PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let locks = LOCKS.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let path = Repository::open(worktree)
+        .map(|repo| repo.commondir().to_path_buf())
+        .unwrap_or_else(|_| worktree.to_path_buf())
+        .canonicalize()
+        .unwrap_or_else(|_| worktree.to_path_buf());
+    let mut locks = locks.lock().unwrap_or_else(|poison| poison.into_inner());
+    locks.entry(path).or_default().clone()
+}
+
+fn with_network_lock<T>(worktree: &Path, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    let lock = network_lock(worktree);
+    let _guard = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+    operation()
+}
+
+fn pull_preview_from_repo(
+    repo: &Repository,
+    remote: &str,
+    branch: &str,
+    repo_path: &Path,
+    worktree_path: &Path,
+) -> Result<PullPreview> {
+    let head = repo.head()?.peel_to_commit()?.id();
+    let upstream = repo
+        .find_reference(&format!("refs/remotes/{remote}/{branch}"))?
+        .peel_to_commit()?
+        .id();
+    let (ahead, behind) = repo.graph_ahead_behind(head, upstream)?;
+    let mut options = StatusOptions::new();
+    options
+        .include_untracked(true)
+        .include_ignored(false)
+        .include_unmodified(false);
+    let statuses = repo.statuses(Some(&mut options))?;
+    let local_paths = statuses
+        .iter()
+        .filter_map(|entry| entry.path().map(std::path::PathBuf::from))
+        .collect::<std::collections::HashSet<_>>();
+    let local_changes = !local_paths.is_empty();
+    let remote_ref = format!("refs/remotes/{remote}/{branch}");
+    let changed_files = if behind == 0 {
+        Vec::new()
+    } else {
+        let output = std::process::Command::new("git")
+            .current_dir(worktree_path)
+            .args(["diff", "--name-only", "HEAD", &remote_ref, "--"])
+            .output()
+            .with_context(|| "Failed to list files changed by the pull")?;
+        if !output.status.success() {
+            anyhow::bail!("git diff could not preview the pull");
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(std::path::PathBuf::from)
+            .collect()
+    };
+    let mut conflict_files = if behind == 0 {
+        Vec::new()
+    } else {
+        let output = std::process::Command::new("git")
+            .current_dir(worktree_path)
+            .args([
+                "merge-tree",
+                "--write-tree",
+                "--name-only",
+                "-z",
+                "HEAD",
+                &remote_ref,
+            ])
+            .output()
+            .with_context(|| "Failed to preview the pull merge")?;
+        if output.status.success() {
+            Vec::new()
+        } else if output.status.code() == Some(1) {
+            parse_merge_tree_conflict_paths(&output.stdout)
+        } else {
+            anyhow::bail!(
+                "git merge-tree preview failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+    };
+    conflict_files.extend(
+        changed_files
+            .iter()
+            .filter(|path| local_paths.contains(*path))
+            .cloned(),
+    );
+    conflict_files.sort();
+    conflict_files.dedup();
+    Ok(PullPreview {
+        remote: remote.to_owned(),
+        branch: branch.to_owned(),
+        repo_path: repo_path.to_path_buf(),
+        worktree_path: worktree_path.to_path_buf(),
+        incoming_commits: behind,
+        outgoing_commits: ahead,
+        changed_files,
+        conflict_files,
+        has_local_changes: local_changes,
+        auto_stash: false,
+    })
+}
+
+fn parse_merge_tree_conflict_paths(output: &[u8]) -> Vec<std::path::PathBuf> {
+    let mut fields = output
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty());
+    let first = fields.next().unwrap_or_default();
+    let first_is_tree_id =
+        (first.len() == 40 || first.len() == 64) && first.iter().all(u8::is_ascii_hexdigit);
+    let mut paths = Vec::new();
+    if !first_is_tree_id && !first.is_empty() {
+        paths.push(std::path::PathBuf::from(
+            String::from_utf8_lossy(first).into_owned(),
+        ));
+    }
+    for field in fields {
+        let path = String::from_utf8_lossy(field);
+        if path.starts_with("CONFLICT ") || path.starts_with("Auto-merging ") {
+            continue;
+        }
+        paths.push(std::path::PathBuf::from(path.into_owned()));
+    }
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 /// Git refuses to start a merge when it would overwrite existing local edits.
@@ -85,6 +221,7 @@ fn push_with_auto_pull(
     remote: &str,
     remote_branch: &str,
     force: bool,
+    auto_pull_on_rejection: bool,
     pulled: &mut bool,
 ) -> Result<Option<String>> {
     let operation_started = std::time::Instant::now();
@@ -103,6 +240,15 @@ fn push_with_auto_pull(
     );
     match initial_push {
         Ok(details) => Ok(details),
+        Err(push_error)
+            if !force
+                && is_remote_ahead_rejection(&push_error.to_string())
+                && !auto_pull_on_rejection =>
+        {
+            anyhow::bail!(
+                "Remote {remote}/{remote_branch} has new commits. Automatic integration after a rejected push is disabled in Settings; fetch and pull the branch before retrying."
+            )
+        }
         Err(push_error) if !force && is_remote_ahead_rejection(&push_error.to_string()) => {
             log::info!(
                 "Push rejected because remote {}/{} is ahead; trying automatic pull",
@@ -149,9 +295,29 @@ fn push_with_auto_pull(
                 has_local_changes,
             );
             drop(repo);
+            // Refresh the exact destination ref before previewing. No merge or
+            // stash is started until the preview has been inspected.
+            run_git_network_command(worktree, &["fetch", remote, remote_branch])?;
+            *pulled = true;
+            let preview_repo = open_worktree_repo(worktree)?;
+            let preview =
+                pull_preview_from_repo(&preview_repo, remote, remote_branch, worktree, worktree)?;
+            if !preview.conflict_files.is_empty() {
+                let paths = preview
+                    .conflict_files
+                    .iter()
+                    .take(8)
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                anyhow::bail!(
+                    "Automatic pull preview found potential conflicts in {} file(s): {}. No merge was started. Review the files and use Pull to continue manually.",
+                    preview.conflict_files.len(),
+                    paths
+                );
+            }
             // Set before pulling: a merge conflict may modify HEAD, the index
             // or the worktree even when the Git command returns an error.
-            *pulled = true;
             let pull_started = std::time::Instant::now();
             let pull_args = if has_local_changes {
                 vec![
@@ -482,10 +648,12 @@ impl GitProject {
                 .background_executor()
                 .spawn(async move {
                     validate_remote_name(&task_remote_name)?;
-                    let details = run_git_network_command(
-                        &task_worktree_path,
-                        &["fetch", "--prune", &task_remote_name],
-                    )?;
+                    let details = with_network_lock(&task_worktree_path, || {
+                        run_git_network_command(
+                            &task_worktree_path,
+                            &["fetch", "--prune", &task_remote_name],
+                        )
+                    })?;
                     let data = gather_refresh_data(&repo_path, commit_limit)?;
                     anyhow::Ok((details, data))
                 })
@@ -561,6 +729,51 @@ impl GitProject {
         self.pull_from_at(remote_name, &branch_name, worktree_path, cx)
     }
 
+    /// Fetch the pull target and calculate its effect without changing HEAD,
+    /// the index, or working-tree files. The fetched remote-tracking ref is
+    /// intentionally updated so a subsequent Pull uses the exact previewed
+    /// commit rather than a stale advertisement.
+    pub fn preview_pull_at(
+        &mut self,
+        worktree_path: &Path,
+        auto_stash: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<PullPreview>> {
+        let (remote_name, branch_name) =
+            match open_worktree_repo(worktree_path).and_then(|repo| pull_target(&repo, None)) {
+                Ok(target) => target,
+                Err(error) => return Task::ready(Err(error)),
+            };
+        let remote_name = remote_name.to_string();
+        let branch_name = branch_name.to_string();
+        let worktree_path = worktree_path.to_path_buf();
+        let repo_path = self.repo_path.clone();
+        cx.spawn(async move |_, cx: &mut AsyncApp| {
+            cx.background_executor()
+                .spawn(async move {
+                    validate_remote_name(&remote_name)?;
+                    validate_branch_name(&branch_name)?;
+                    with_network_lock(&worktree_path, || {
+                        run_git_network_command(
+                            &worktree_path,
+                            &["fetch", "--prune", &remote_name, &branch_name],
+                        )
+                    })?;
+                    let repo = open_worktree_repo(&worktree_path)?;
+                    let mut preview = pull_preview_from_repo(
+                        &repo,
+                        &remote_name,
+                        &branch_name,
+                        &repo_path,
+                        &worktree_path,
+                    )?;
+                    preview.auto_stash = auto_stash;
+                    Ok(preview)
+                })
+                .await
+        })
+    }
+
     pub fn pull_from_at(
         &mut self,
         remote_name: &str,
@@ -569,6 +782,17 @@ impl GitProject {
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
         self.pull_from_with_options_at(remote_name, branch_name, worktree_path, false, cx)
+    }
+
+    pub fn pull_from_with_auto_stash_at(
+        &mut self,
+        remote_name: &str,
+        branch_name: &str,
+        worktree_path: &Path,
+        auto_stash: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        self.pull_from_with_options_at(remote_name, branch_name, worktree_path, auto_stash, cx)
     }
 
     fn pull_from_with_options_at(
@@ -615,7 +839,9 @@ impl GitProject {
                         validate_branch_name(&task_branch_name)?;
                         let args = pull_arguments(&task_remote_name, &task_branch_name, auto_stash);
                         let git_started = std::time::Instant::now();
-                        let pull_result = run_git_network_command(&task_worktree_path, &args);
+                        let pull_result = with_network_lock(&task_worktree_path, || {
+                            run_git_network_command(&task_worktree_path, &args)
+                        });
                         log::info!(
                             "pull timing: git command completed in {:?} (remote={} branch={})",
                             git_started.elapsed(),
@@ -720,12 +946,22 @@ impl GitProject {
                         Ok((msg, is_conflict, details, _preserve_status_cache)) => {
                             if is_conflict {
                                 this.refresh_after_network_operation(cx);
-                                this.fail_op(
+                                this.fail_op_with_kind(
                                     operation_id,
                                     GitOperationKind::Pull,
                                     msg!("git.pull.conflict", remote = &remote_name),
                                     msg,
                                     (Some(remote_name.clone()), Some(branch_name.clone()), false),
+                                    Some(
+                                        if details
+                                            .as_deref()
+                                            .is_some_and(|text| text.contains("Applying autostash"))
+                                        {
+                                            GitOperationFailureKind::AutostashConflict
+                                        } else {
+                                            GitOperationFailureKind::MergeConflict
+                                        },
+                                    ),
                                     cx,
                                 );
                             } else {
@@ -754,7 +990,7 @@ impl GitProject {
                             // refuses the merge, so reconcile them in the
                             // background while keeping the watcher gated.
                             this.refresh_after_network_operation(cx);
-                            this.fail_op(
+                            this.fail_op_with_kind(
                                 operation_id,
                                 GitOperationKind::Pull,
                                 if blocked_by_local_edits {
@@ -768,6 +1004,11 @@ impl GitProject {
                                     Some(branch_name.clone()),
                                     !blocked_by_local_edits,
                                 ),
+                                Some(if blocked_by_local_edits {
+                                    GitOperationFailureKind::LocalChangesBlocked
+                                } else {
+                                    GitOperationFailureKind::OperationInProgress
+                                }),
                                 cx,
                             );
                         }
@@ -840,6 +1081,10 @@ impl GitProject {
         let task_remote_branch_name = remote_branch_name.clone();
         let task_worktree_path = worktree_path.to_path_buf();
         let refresh_caches = self.refresh_caches.clone();
+        let auto_pull_on_rejection = cx
+            .try_global::<SettingsState>()
+            .map(|settings| settings.settings().auto_pull_on_push_rejection)
+            .unwrap_or(true);
         let kind = GitOperationKind::push(force);
         let operation_id = self.begin_operation(
             kind,
@@ -884,14 +1129,17 @@ impl GitProject {
                         args.push(task_remote_name.as_str());
                         let refspec = format!("HEAD:{}", task_remote_branch_name);
                         args.push(refspec.as_str());
-                        let details = push_with_auto_pull(
-                            &task_worktree_path,
-                            &args,
-                            &task_remote_name,
-                            &task_remote_branch_name,
-                            force,
-                            &mut pulled,
-                        )?;
+                        let details = with_network_lock(&task_worktree_path, || {
+                            push_with_auto_pull(
+                                &task_worktree_path,
+                                &args,
+                                &task_remote_name,
+                                &task_remote_branch_name,
+                                force,
+                                auto_pull_on_rejection,
+                                &mut pulled,
+                            )
+                        })?;
                         let msg = if force {
                             msg!(
                                 "git.force_push.done",
@@ -956,7 +1204,26 @@ impl GitProject {
                                 this.refresh_after_network_operation(cx);
                             }
                             log::error!("Push failed: {}", e);
-                            this.fail_op(
+                            let error_text = e.to_string();
+                            let failure_kind = if error_text.contains("pending MERGE_AUTOSTASH") {
+                                Some(GitOperationFailureKind::PendingAutostash)
+                            } else if error_text.contains("Automatic pull preview found potential conflicts")
+                                || error_text.contains("CONFLICT")
+                                || error_text.contains("Automatic merge failed")
+                            {
+                                Some(GitOperationFailureKind::MergeConflict)
+                            } else if error_text.contains("Automatic pull of")
+                                && error_text.contains("autostash")
+                            {
+                                Some(GitOperationFailureKind::AutostashConflict)
+                            } else if is_remote_ahead_rejection(&error_text)
+                                || error_text.contains("Automatic integration after a rejected push is disabled")
+                            {
+                                Some(GitOperationFailureKind::ConcurrentRemoteUpdate)
+                            } else {
+                                None
+                            };
+                            this.fail_op_with_kind(
                                 operation_id,
                                 kind,
                                 if force {
@@ -970,6 +1237,7 @@ impl GitProject {
                                     Some(remote_branch_name.clone()),
                                     true,
                                 ),
+                                failure_kind,
                                 cx,
                             );
                         }
@@ -986,7 +1254,7 @@ impl GitProject {
 mod push_auto_pull_tests {
     use super::{
         head_contains_fetched_commit, is_remote_ahead_rejection, pending_merge_autostash,
-        push_with_auto_pull,
+        pull_preview_from_repo, push_with_auto_pull,
     };
     use git2::{Repository, RepositoryState};
     use std::fs;
@@ -998,6 +1266,7 @@ mod push_auto_pull_tests {
             .current_dir(path)
             .args(args)
             .env("GIT_TERMINAL_PROMPT", "0")
+            .env_remove("GIT_SSH_COMMAND")
             .output()
             .expect("git executable is required by rgitui");
         assert!(
@@ -1045,10 +1314,8 @@ mod push_auto_pull_tests {
             git(&local, &["config", "user.name", "Local Tester"]);
             git(&local, &["config", "user.email", "local@example.test"]);
             commit(&local, "base.txt", "base\n", "base");
-            git(
-                &local,
-                &["remote", "add", "origin", remote.to_str().unwrap()],
-            );
+            let remote_url = format!("file:///{}", remote.to_string_lossy().replace('\\', "/"));
+            git(&local, &["remote", "add", "origin", &remote_url]);
             git(&local, &["push", "-u", "origin", "dev"]);
             git(
                 dir.path(),
@@ -1082,6 +1349,7 @@ mod push_auto_pull_tests {
                 "origin",
                 "dev",
                 false,
+                true,
                 pulled,
             )
         }
@@ -1240,29 +1508,91 @@ mod push_auto_pull_tests {
     }
 
     #[test]
-    fn merge_conflict_aborts_retry_and_keeps_conflict_for_resolution() {
+    fn merge_conflict_is_previewed_without_mutating_the_worktree() {
         let repos = TestRepos::new();
         repos.push_peer("base.txt", "remote text\n");
         commit(&repos.local, "base.txt", "local text\n", "local edit");
+        let local_head = git(&repos.local, &["rev-parse", "HEAD"]);
         let remote_head = repos.remote_head();
         let mut pulled = false;
         let error = repos.push_with_recovery(&mut pulled).unwrap_err();
-        assert!(error.to_string().contains("Automatic pull"));
+        assert!(error
+            .to_string()
+            .contains("preview found potential conflicts"));
+        assert!(error.to_string().contains("base.txt"));
         assert!(pulled);
         assert_eq!(repos.remote_head(), remote_head);
         assert_eq!(
             Repository::open(&repos.local).unwrap().state(),
-            RepositoryState::Merge
+            RepositoryState::Clean
         );
-        assert!(
+        assert_eq!(git(&repos.local, &["rev-parse", "HEAD"]), local_head);
+        assert_eq!(
+            fs::read_to_string(repos.local.join("base.txt")).unwrap(),
+            "local text\n"
+        );
+        assert_eq!(
             Repository::open(&repos.local)
                 .unwrap()
                 .index()
                 .unwrap()
                 .conflicts()
                 .unwrap()
-                .count()
-                > 0
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn pull_preview_counts_commits_and_detects_file_conflicts_without_checkout_changes() {
+        let repos = TestRepos::new();
+        repos.push_peer("base.txt", "remote text\n");
+        commit(&repos.local, "base.txt", "local text\n", "local edit");
+        git(&repos.local, &["fetch", "origin", "dev"]);
+        let head = git(&repos.local, &["rev-parse", "HEAD"]);
+        let contents = fs::read_to_string(repos.local.join("base.txt")).unwrap();
+        let repo = Repository::open(&repos.local).unwrap();
+
+        let preview =
+            pull_preview_from_repo(&repo, "origin", "dev", &repos.local, &repos.local).unwrap();
+
+        assert_eq!(preview.incoming_commits, 1);
+        assert_eq!(preview.outgoing_commits, 1);
+        assert_eq!(preview.conflict_files, vec![PathBuf::from("base.txt")]);
+        assert_eq!(git(&repos.local, &["rev-parse", "HEAD"]), head);
+        assert_eq!(
+            fs::read_to_string(repos.local.join("base.txt")).unwrap(),
+            contents
+        );
+        assert_eq!(
+            Repository::open(&repos.local).unwrap().state(),
+            RepositoryState::Clean
+        );
+    }
+
+    #[test]
+    fn automatic_pull_can_be_disabled_without_fetching_or_mutating() {
+        let repos = TestRepos::new();
+        repos.push_peer("peer.txt", "remote update\n");
+        let local_head = git(&repos.local, &["rev-parse", "HEAD"]);
+        let mut pulled = false;
+        let error = push_with_auto_pull(
+            &repos.local,
+            &["push", "origin", "HEAD:dev"],
+            "origin",
+            "dev",
+            false,
+            false,
+            &mut pulled,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("disabled in Settings"));
+        assert!(!pulled);
+        assert_eq!(git(&repos.local, &["rev-parse", "HEAD"]), local_head);
+        assert_eq!(
+            Repository::open(&repos.local).unwrap().state(),
+            RepositoryState::Clean
         );
     }
 }
@@ -1277,5 +1607,30 @@ mod pull_status_cache_tests {
         assert!(!pull_can_reuse_status_cache(true, false, true));
         assert!(!pull_can_reuse_status_cache(false, true, true));
         assert!(!pull_can_reuse_status_cache(false, false, false));
+    }
+}
+
+#[cfg(test)]
+mod pull_preview_tests {
+    use super::parse_merge_tree_conflict_paths;
+    use std::path::PathBuf;
+
+    #[test]
+    fn parses_nul_delimited_conflict_paths_after_tree_id() {
+        let paths = parse_merge_tree_conflict_paths(
+            b"0123456789012345678901234567890123456789\0src/a.rs\0nested/b.txt\0",
+        );
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("nested/b.txt"), PathBuf::from("src/a.rs")]
+        );
+    }
+
+    #[test]
+    fn drops_merge_tree_diagnostic_fields() {
+        let paths = parse_merge_tree_conflict_paths(
+            b"0123456789012345678901234567890123456789\0CONFLICT (content): file.txt\0file.txt\0",
+        );
+        assert_eq!(paths, vec![PathBuf::from("file.txt")]);
     }
 }

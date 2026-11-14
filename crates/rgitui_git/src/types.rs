@@ -672,6 +672,30 @@ pub enum GitOperationState {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitOperationFailureKind {
+    LocalChangesBlocked,
+    MergeConflict,
+    AutostashConflict,
+    PendingAutostash,
+    ConcurrentRemoteUpdate,
+    OperationInProgress,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullPreview {
+    pub remote: String,
+    pub branch: String,
+    pub repo_path: std::path::PathBuf,
+    pub worktree_path: std::path::PathBuf,
+    pub incoming_commits: usize,
+    pub outgoing_commits: usize,
+    pub changed_files: Vec<std::path::PathBuf>,
+    pub conflict_files: Vec<std::path::PathBuf>,
+    pub has_local_changes: bool,
+    pub auto_stash: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct GitOperationUpdate {
     pub id: u64,
@@ -691,6 +715,7 @@ pub struct GitOperationUpdate {
     /// where the failure is a timeout or a rejected push, is the normal case.
     pub worktree_path: Option<std::path::PathBuf>,
     pub retryable: bool,
+    pub failure_kind: Option<GitOperationFailureKind>,
 }
 
 #[cfg(test)]

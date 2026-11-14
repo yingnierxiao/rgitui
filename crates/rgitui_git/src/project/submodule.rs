@@ -558,6 +558,8 @@ mod tests {
         let (_temp, parent, source) = fixture();
         let source_url = source.to_string_lossy().to_string();
         assert!(submodule_add(&parent, &source_url, Path::new("../outside"), None, false).is_err());
-        assert!(submodule_add(&parent, &source_url, Path::new(".git/config"), None, false).is_err());
+        assert!(
+            submodule_add(&parent, &source_url, Path::new(".git/config"), None, false).is_err()
+        );
     }
 }

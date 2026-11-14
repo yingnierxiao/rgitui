@@ -453,6 +453,7 @@ pub struct SettingsView {
     show_subject_column: bool,
     auto_fetch_interval: AutoFetchInterval,
     confirm_destructive_operations: bool,
+    auto_pull_on_push_rejection: bool,
     auto_check_updates: bool,
     watch_all_worktrees: bool,
     terminal_command_editor: Entity<TextInput>,
@@ -1031,6 +1032,7 @@ impl SettingsView {
             auto_fetch_interval: settings.auto_fetch_interval,
             auto_fetch_select,
             confirm_destructive_operations: settings.confirm_destructive_operations,
+            auto_pull_on_push_rejection: settings.auto_pull_on_push_rejection,
             auto_check_updates: settings.auto_check_updates,
             watch_all_worktrees: settings.watch_all_worktrees,
             terminal_command_editor,
@@ -1112,6 +1114,7 @@ impl SettingsView {
                 self.show_subject_column = s.show_subject_column;
                 self.auto_fetch_interval = s.auto_fetch_interval;
                 self.confirm_destructive_operations = s.confirm_destructive_operations;
+                self.auto_pull_on_push_rejection = s.auto_pull_on_push_rejection;
                 self.auto_check_updates = s.auto_check_updates;
                 self.watch_all_worktrees = s.watch_all_worktrees;
                 self.feedback_generation = self.feedback_generation.wrapping_add(1);
@@ -1376,6 +1379,7 @@ impl SettingsView {
             state.settings_mut().auto_fetch_interval = self.auto_fetch_interval;
             state.settings_mut().confirm_destructive_operations =
                 self.confirm_destructive_operations;
+            state.settings_mut().auto_pull_on_push_rejection = self.auto_pull_on_push_rejection;
             state.settings_mut().auto_check_updates = self.auto_check_updates;
             state.settings_mut().watch_all_worktrees = self.watch_all_worktrees;
             state.settings_mut().terminal_command = terminal_command.trim().to_string();
@@ -3977,6 +3981,49 @@ impl SettingsView {
                 ),
         );
         section = section.child(confirm_card);
+
+        let auto_pull_on_push_rejection = self.auto_pull_on_push_rejection;
+        let mut auto_pull_card = Self::setting_card(cx);
+        auto_pull_card = auto_pull_card.child(
+            div()
+                .h_flex()
+                .w_full()
+                .items_center()
+                .child(
+                    div()
+                        .v_flex()
+                        .flex_1()
+                        .gap(px(2.))
+                        .child(
+                            Label::new(t!("settings.auto_pull_on_push.title"))
+                                .size(LabelSize::Small)
+                                .weight(FontWeight::SEMIBOLD),
+                        )
+                        .child(
+                            Label::new(t!("settings.auto_pull_on_push.description"))
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("auto-pull-on-push-toggle")
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.auto_pull_on_push_rejection = !this.auto_pull_on_push_rejection;
+                            this.save_settings(cx);
+                        }))
+                        .child(Checkbox::new(
+                            "auto-pull-on-push-cb",
+                            if auto_pull_on_push_rejection {
+                                CheckState::Checked
+                            } else {
+                                CheckState::Unchecked
+                            },
+                        )),
+                ),
+        );
+        section = section.child(auto_pull_card);
 
         // Auto-check updates card
         let auto_check_updates = self.auto_check_updates;

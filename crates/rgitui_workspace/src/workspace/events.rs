@@ -23,10 +23,10 @@ use crate::{
     FileHistoryView, FileHistoryViewEvent, GlobalSearchView, GlobalSearchViewEvent,
     InteractiveRebase, InteractiveRebaseEvent, ReflogView, ReflogViewEvent, RemoteDialog,
     RemoteDialogEvent, RenameDialog, RenameDialogEvent, RepoCloneDialog, RepoCloneEvent,
-    RepoOpener, RepoOpenerEvent, ShortcutsHelp,
-    ShortcutsHelpEvent, Sidebar, SidebarEvent, StashBranchDialog, StashBranchDialogEvent,
-    StashSaveDialog, StashSaveDialogEvent, SubmoduleView, SubmoduleViewEvent, TagDialog,
-    TagDialogEvent, ToastKind, Toolbar, ToolbarEvent, WorktreeDialog, WorktreeDialogEvent,
+    RepoOpener, RepoOpenerEvent, ShortcutsHelp, ShortcutsHelpEvent, Sidebar, SidebarEvent,
+    StashBranchDialog, StashBranchDialogEvent, StashSaveDialog, StashSaveDialogEvent,
+    SubmoduleView, SubmoduleViewEvent, TagDialog, TagDialogEvent, ToastKind, Toolbar, ToolbarEvent,
+    WorktreeDialog, WorktreeDialogEvent,
 };
 
 pub(super) fn subscribe_add_submodule_dialog(
@@ -119,53 +119,45 @@ pub(super) fn subscribe_add_submodule_dialog(
     .detach();
 }
 
-pub(super) fn subscribe_remote_dialog(
-    cx: &mut Context<Workspace>,
-    dialog: &Entity<RemoteDialog>,
-) {
-    cx.subscribe(
-        dialog,
-        |this, dialog, event: &RemoteDialogEvent, cx| {
-            let Some(tab) = this.tabs.get(this.active_tab) else {
-                return;
-            };
-            let project = tab.project.clone();
-            let dialog = dialog.clone();
-            let task = match event {
-                RemoteDialogEvent::Add {
-                    name,
-                    url,
-                    is_default,
-                } => project.update(cx, |project, cx| {
-                    project.add_remote(name, url, *is_default, cx)
-                }),
-                RemoteDialogEvent::Edit {
-                    old_name,
-                    name,
-                    url,
-                    is_default,
-                } => project.update(cx, |project, cx| {
-                    project.update_remote(old_name, name, url, *is_default, cx)
-                }),
-                RemoteDialogEvent::Dismissed => return,
-            };
-            cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
-                let result = task.await.map_err(|error| error.to_string());
-                cx.update(|cx| {
-                    let _ = dialog.update(cx, |dialog, cx| dialog.on_finished(result.clone(), cx));
-                    let _ = this.update(cx, |workspace, cx| match result {
-                        Ok(()) => workspace.show_toast(
-                            "远程仓库已更新".to_string(),
-                            ToastKind::Success,
-                            cx,
-                        ),
-                        Err(error) => workspace.show_toast(error, ToastKind::Error, cx),
-                    });
+pub(super) fn subscribe_remote_dialog(cx: &mut Context<Workspace>, dialog: &Entity<RemoteDialog>) {
+    cx.subscribe(dialog, |this, dialog, event: &RemoteDialogEvent, cx| {
+        let Some(tab) = this.tabs.get(this.active_tab) else {
+            return;
+        };
+        let project = tab.project.clone();
+        let dialog = dialog.clone();
+        let task = match event {
+            RemoteDialogEvent::Add {
+                name,
+                url,
+                is_default,
+            } => project.update(cx, |project, cx| {
+                project.add_remote(name, url, *is_default, cx)
+            }),
+            RemoteDialogEvent::Edit {
+                old_name,
+                name,
+                url,
+                is_default,
+            } => project.update(cx, |project, cx| {
+                project.update_remote(old_name, name, url, *is_default, cx)
+            }),
+            RemoteDialogEvent::Dismissed => return,
+        };
+        cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
+            let result = task.await.map_err(|error| error.to_string());
+            cx.update(|cx| {
+                let _ = dialog.update(cx, |dialog, cx| dialog.on_finished(result.clone(), cx));
+                let _ = this.update(cx, |workspace, cx| match result {
+                    Ok(()) => {
+                        workspace.show_toast("远程仓库已更新".to_string(), ToastKind::Success, cx)
+                    }
+                    Err(error) => workspace.show_toast(error, ToastKind::Error, cx),
                 });
-            })
-            .detach();
-        },
-    )
+            });
+        })
+        .detach();
+    })
     .detach();
 }
 
@@ -797,6 +789,36 @@ pub(super) fn subscribe_confirm_dialog(
     cx.subscribe(
         confirm_dialog,
         |this, _cd, event: &ConfirmDialogEvent, cx| match event {
+            ConfirmDialogEvent::Confirmed(ConfirmAction::PullPreview(preview)) => {
+                let Some(project) = this
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.project.read(cx).repo_path() == preview.repo_path.as_path())
+                    .map(|tab| tab.project.clone())
+                else {
+                    this.show_toast(
+                        t!("workspace.pull_preview.repository_closed"),
+                        ToastKind::Error,
+                        cx,
+                    );
+                    return;
+                };
+                let remote = preview.remote.clone();
+                let branch = preview.branch.clone();
+                let worktree_path = preview.worktree_path.clone();
+                let auto_stash = preview.auto_stash;
+                project.update(cx, |project, cx| {
+                    project
+                        .pull_from_with_auto_stash_at(
+                            &remote,
+                            &branch,
+                            &worktree_path,
+                            auto_stash,
+                            cx,
+                        )
+                        .detach();
+                });
+            }
             ConfirmDialogEvent::Confirmed(action) => {
                 if let Some(tab) = this.tabs.get(this.active_tab) {
                     let project = tab.project.clone();
@@ -994,12 +1016,19 @@ pub(super) fn subscribe_confirm_dialog(
                                 cx.update(|cx| {
                                     let _ = this.update(cx, |workspace, cx| match result {
                                         Ok(()) => workspace.show_toast(
-                                            t!("workspace.remote_branch.delete_done", branch = name),
+                                            t!(
+                                                "workspace.remote_branch.delete_done",
+                                                branch = name
+                                            ),
                                             ToastKind::Success,
                                             cx,
                                         ),
                                         Err(error) => workspace.show_toast(
-                                            t!("workspace.remote_branch.delete_failed", branch = name, error = error.to_string()),
+                                            t!(
+                                                "workspace.remote_branch.delete_failed",
+                                                branch = name,
+                                                error = error.to_string()
+                                            ),
                                             ToastKind::Error,
                                             cx,
                                         ),
@@ -1034,9 +1063,8 @@ pub(super) fn subscribe_confirm_dialog(
                             let submodule_view = tab.submodule_view.clone();
                             let sidebar = tab.sidebar.clone();
                             let project = project.clone();
-                            let task = project.update(cx, |proj, cx| {
-                                proj.submodule_remove_async(path, cx)
-                            });
+                            let task = project
+                                .update(cx, |proj, cx| proj.submodule_remove_async(path, cx));
                             cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
                                 let result = task.await;
                                 let submodules = if result.is_ok() {
@@ -1074,6 +1102,9 @@ pub(super) fn subscribe_confirm_dialog(
                             })
                             .detach();
                         }
+                        ConfirmAction::PullPreview(_) => unreachable!(
+                            "pull previews are handled before destructive confirmation actions"
+                        ),
                     }
                 }
             }
@@ -1554,7 +1585,6 @@ pub(super) fn subscribe_project(cx: &mut Context<Workspace>, subs: ProjectSubscr
                     .detach();
                 }
 
-
                 // Delay expensive line counts until the file list is already
                 // interactive. The first pass targets files currently shown by
                 // this tab; the remaining counts arrive in the background.
@@ -1666,8 +1696,10 @@ pub(super) fn subscribe_project(cx: &mut Context<Workspace>, subs: ProjectSubscr
                     tb.set_fetching(is_running && update.kind == GitOperationKind::Fetch, cx);
                     tb.set_pulling(is_running && update.kind == GitOperationKind::Pull, cx);
                     tb.set_pushing(is_running && update.kind.is_push(), cx);
-                    if matches!(update.kind, GitOperationKind::Fetch | GitOperationKind::Pull)
-                        || update.kind.is_push()
+                    if matches!(
+                        update.kind,
+                        GitOperationKind::Fetch | GitOperationKind::Pull
+                    ) || update.kind.is_push()
                     {
                         let started_at = if is_running {
                             this.operations
@@ -1993,9 +2025,7 @@ pub(super) fn subscribe_sidebar(
                 cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
                     let result = cx
                         .background_executor()
-                        .spawn(async move {
-                            rgitui_git::add_gitignore_rule(&worktree_path, &rule)
-                        })
+                        .spawn(async move { rgitui_git::add_gitignore_rule(&worktree_path, &rule) })
                         .await;
                     cx.update(|cx| {
                         let _ = this.update(cx, |workspace, cx| match result {
@@ -2062,10 +2092,14 @@ pub(super) fn subscribe_sidebar(
             }
             SidebarEvent::RemoteBranchPull(name) => {
                 let worktree_path = this.effective_worktree_path(cx);
-                match project.read(cx).remote_branch_parts_at(&worktree_path, name) {
+                match project
+                    .read(cx)
+                    .remote_branch_parts_at(&worktree_path, name)
+                {
                     Ok((remote, branch)) => {
                         project.update(cx, |proj, cx| {
-                            proj.pull_from_at(&remote, &branch, &worktree_path, cx).detach();
+                            proj.pull_from_at(&remote, &branch, &worktree_path, cx)
+                                .detach();
                         });
                     }
                     Err(error) => this.show_toast(error.to_string(), ToastKind::Error, cx),
@@ -2126,14 +2160,20 @@ pub(super) fn subscribe_sidebar(
                                     });
                                 } else {
                                     viewer.update(cx, |viewer, cx| {
-                                        viewer.set_error(t!("workspace.remote_branch.no_differences"), cx)
+                                        viewer.set_error(
+                                            t!("workspace.remote_branch.no_differences"),
+                                            cx,
+                                        )
                                     });
                                 }
                                 detail.update(cx, |detail, cx| detail.clear(cx));
                             }
                             Err(error) => viewer.update(cx, |viewer, cx| {
                                 viewer.set_error(
-                                    t!("workspace.remote_branch.compare_failed", error = error.to_string()),
+                                    t!(
+                                        "workspace.remote_branch.compare_failed",
+                                        error = error.to_string()
+                                    ),
                                     cx,
                                 )
                             }),
@@ -2155,7 +2195,11 @@ pub(super) fn subscribe_sidebar(
                     .remote_dialog
                     .update(cx, |dialog, cx| dialog.show_add(cx));
             }
-            SidebarEvent::RemoteEdit { name, url, is_default } => {
+            SidebarEvent::RemoteEdit {
+                name,
+                url,
+                is_default,
+            } => {
                 this.dialogs.remote_dialog.update(cx, |dialog, cx| {
                     dialog.show_edit(name.clone(), url.clone(), *is_default, cx)
                 });
@@ -3072,13 +3116,21 @@ fn open_rebase_for_commit(
         return;
     }
 
-    workspace.overlays.interactive_rebase.update(cx, |dialog, cx| {
-        if edit_message {
-            dialog.show_visible_reword(entries, format!("{} (rebase onto)", base_short), target_idx, cx);
-        } else {
-            dialog.show_visible(entries, format!("{} (rebase onto)", base_short), cx);
-        }
-    });
+    workspace
+        .overlays
+        .interactive_rebase
+        .update(cx, |dialog, cx| {
+            if edit_message {
+                dialog.show_visible_reword(
+                    entries,
+                    format!("{} (rebase onto)", base_short),
+                    target_idx,
+                    cx,
+                );
+            } else {
+                dialog.show_visible(entries, format!("{} (rebase onto)", base_short), cx);
+            }
+        });
 }
 
 pub(super) fn subscribe_detail_panel(
@@ -3110,38 +3162,66 @@ pub(super) fn subscribe_detail_panel(
                         diff_viewer.update(cx, |dv, cx| dv.clear(cx));
                         return;
                     }
-                    let max_size = cx.global::<rgitui_settings::SettingsState>()
-                        .settings().diff_file_size_limit_mb as u64 * 1024 * 1024;
+                    let max_size = cx
+                        .global::<rgitui_settings::SettingsState>()
+                        .settings()
+                        .diff_file_size_limit_mb as u64
+                        * 1024
+                        * 1024;
                     if file_diff.size_bytes > max_size {
                         this.show_toast(
-                            t!("diff.skipped.large", size = file_diff.size_bytes / (1024 * 1024), limit = max_size / (1024 * 1024)).to_string(),
+                            t!(
+                                "diff.skipped.large",
+                                size = file_diff.size_bytes / (1024 * 1024),
+                                limit = max_size / (1024 * 1024)
+                            )
+                            .to_string(),
                             ToastKind::Info,
                             cx,
                         );
                         diff_viewer.update(cx, |dv, cx| dv.clear(cx));
                         return;
                     }
-                    let Ok(oid) = git2::Oid::from_str(&oid) else { return };
+                    let Ok(oid) = git2::Oid::from_str(&oid) else {
+                        return;
+                    };
                     let repo_path = project.read(cx).repo_path().to_path_buf();
                     let path = std::path::PathBuf::from(path);
                     let dv = diff_viewer.clone();
                     let request_generation = dv.update(cx, |dv, cx| dv.begin_diff_request(cx));
                     cx.spawn(async move |_, cx: &mut gpui::AsyncApp| {
-                        let result = cx.background_executor().spawn(async move {
-                            rgitui_git::compute_commit_file_diff(&repo_path, oid, &path, max_size)
-                        }).await;
+                        let result = cx
+                            .background_executor()
+                            .spawn(async move {
+                                rgitui_git::compute_commit_file_diff(
+                                    &repo_path, oid, &path, max_size,
+                                )
+                            })
+                            .await;
                         cx.update(|cx| {
-                            if dv.read(cx).generation() != request_generation { return; }
+                            if dv.read(cx).generation() != request_generation {
+                                return;
+                            }
                             match result {
                                 Ok(Some(file)) => {
                                     let path = file.path.display().to_string();
-                                    dv.update(cx, |dv, cx| dv.set_diff(file, path, DiffSource::Commit(oid.to_string()), cx));
+                                    dv.update(cx, |dv, cx| {
+                                        dv.set_diff(
+                                            file,
+                                            path,
+                                            DiffSource::Commit(oid.to_string()),
+                                            cx,
+                                        )
+                                    });
                                 }
                                 Ok(None) => dv.update(cx, |dv, cx| dv.clear(cx)),
-                                Err(error) => dv.update(cx, |dv, cx| dv.set_error(format!("Failed to load file diff: {error}"), cx)),
+                                Err(error) => dv.update(cx, |dv, cx| {
+                                    dv.set_error(format!("Failed to load file diff: {error}"), cx)
+                                }),
                             }
                         });
-                    }).detach();
+                    })
+                    .detach();
                 } else {
                     let p = path.clone();
                     let fd = file_diff.clone();

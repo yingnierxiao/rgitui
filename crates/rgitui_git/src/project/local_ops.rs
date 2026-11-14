@@ -276,7 +276,10 @@ fn tree_for_virtual_selection(
     // present in the UI snapshot. Otherwise an IDE/CLI stage between refresh
     // and Commit could silently leak an unselected file into the commit.
     let mut excluded_paths = excluded.to_vec();
-    let mut seen = excluded_paths.iter().cloned().collect::<std::collections::HashSet<_>>();
+    let mut seen = excluded_paths
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
     let staged_output = super::git_command()
         .current_dir(worktree)
         .env("GIT_INDEX_FILE", &temp_index_path)
@@ -288,9 +291,15 @@ fn tree_for_virtual_selection(
             String::from_utf8_lossy(&staged_output.stderr)
         );
     }
-    for path in staged_output.stdout.split(|byte| *byte == 0).filter(|part| !part.is_empty()) {
-        let path = PathBuf::from(std::str::from_utf8(path)
-            .context("A staged path is not valid UTF-8; refusing to guess its identity")?);
+    for path in staged_output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+    {
+        let path = PathBuf::from(
+            std::str::from_utf8(path)
+                .context("A staged path is not valid UTF-8; refusing to guess its identity")?,
+        );
         let included = selected.iter().any(|file| path.starts_with(&file.path));
         if !included && seen.insert(path.clone()) {
             excluded_paths.push(path);
@@ -298,7 +307,10 @@ fn tree_for_virtual_selection(
     }
     if !excluded_paths.is_empty() {
         let list = temporary.path().join("excluded.paths");
-        let paths = excluded_paths.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        let paths = excluded_paths
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
         write_selection_pathspec(&list, &paths)?;
         let arg = format!("--pathspec-from-file={}", list.display());
         if repo.head().is_ok() {
@@ -358,10 +370,12 @@ fn tree_for_virtual_selection(
     let oid = run_with_selected_index(worktree, &temp_index_path, &["write-tree"])?;
     let tree_oid = git2::Oid::from_str(oid.trim())
         .with_context(|| format!("Invalid tree id from temporary index: {oid}"))?;
-    if !amend && repo.head().is_ok_and(|head| {
-        head.peel_to_commit()
-            .is_ok_and(|head| head.tree_id() == tree_oid)
-    }) {
+    if !amend
+        && repo.head().is_ok_and(|head| {
+            head.peel_to_commit()
+                .is_ok_and(|head| head.tree_id() == tree_oid)
+        })
+    {
         return Err(error(msg!("git.error.no_staged_changes")));
     }
     Ok(tree_oid)
@@ -1023,7 +1037,11 @@ impl GitProject {
         selection: Option<(Vec<CommitSelectedFile>, Vec<PathBuf>)>,
         cx: &mut Context<Self>,
     ) -> Task<Result<git2::Oid>> {
-        log::info!("commit: amend={} virtual_selection={}", amend, selection.is_some());
+        log::info!(
+            "commit: amend={} virtual_selection={}",
+            amend,
+            selection.is_some()
+        );
         let message = message.to_string();
         let task_message = message.clone();
         let task_selection = selection;
@@ -6124,8 +6142,7 @@ mod tests {
     use rgitui_test_support::TempRepo;
 
     use super::{
-        add_remote_to_repo, remove_remote_from_repo, run_continue_subcommand,
-        update_remote_in_repo,
+        add_remote_to_repo, remove_remote_from_repo, run_continue_subcommand, update_remote_in_repo,
     };
 
     fn anchored(path: &std::path::Path) -> super::AnchoredWorktreePath {
@@ -6184,7 +6201,11 @@ mod tests {
 
         remove_remote_from_repo(&repo, "upstream").unwrap();
         assert!(repo.find_remote("upstream").is_err());
-        assert!(repo.config().unwrap().get_string("remote.pushDefault").is_err());
+        assert!(repo
+            .config()
+            .unwrap()
+            .get_string("remote.pushDefault")
+            .is_err());
     }
 
     fn install_gitlink_conflict(
@@ -7815,11 +7836,8 @@ mod tests {
         fixture.write_file("tracked.txt", "changed\n");
         fixture.stage("tracked.txt");
 
-        super::unstage_paths_in_repo(
-            fixture.repo(),
-            &[std::path::PathBuf::from("tracked.txt")],
-        )
-        .unwrap();
+        super::unstage_paths_in_repo(fixture.repo(), &[std::path::PathBuf::from("tracked.txt")])
+            .unwrap();
 
         let index = fixture.repo().index().unwrap();
         let staged = index
@@ -7828,7 +7846,10 @@ mod tests {
         let head_tree = fixture.repo().head().unwrap().peel_to_tree().unwrap();
         assert_eq!(
             staged.id,
-            head_tree.get_path(std::path::Path::new("tracked.txt")).unwrap().id()
+            head_tree
+                .get_path(std::path::Path::new("tracked.txt"))
+                .unwrap()
+                .id()
         );
         assert_eq!(
             fs::read_to_string(fixture.path().join("tracked.txt")).unwrap(),
@@ -7845,11 +7866,8 @@ mod tests {
         fixture.write_file("added.txt", "added\n");
         fixture.stage("added.txt");
 
-        super::unstage_paths_in_repo(
-            fixture.repo(),
-            &[std::path::PathBuf::from("added.txt")],
-        )
-        .unwrap();
+        super::unstage_paths_in_repo(fixture.repo(), &[std::path::PathBuf::from("added.txt")])
+            .unwrap();
 
         assert!(fixture
             .repo()
@@ -7878,9 +7896,19 @@ mod tests {
         let index = fixture.repo().index().unwrap();
         assert!(index.get_path(std::path::Path::new("new.txt"), 0).is_none());
         assert_eq!(
-            index.get_path(std::path::Path::new("tracked.txt"), 0).unwrap().id,
-            fixture.repo().head().unwrap().peel_to_tree().unwrap()
-                .get_path(std::path::Path::new("tracked.txt")).unwrap().id()
+            index
+                .get_path(std::path::Path::new("tracked.txt"), 0)
+                .unwrap()
+                .id,
+            fixture
+                .repo()
+                .head()
+                .unwrap()
+                .peel_to_tree()
+                .unwrap()
+                .get_path(std::path::Path::new("tracked.txt"))
+                .unwrap()
+                .id()
         );
         assert_eq!(
             fs::read_to_string(fixture.path().join("tracked.txt")).unwrap(),
@@ -7895,11 +7923,8 @@ mod tests {
         fixture.write_file("first.txt", "content\n");
         fixture.stage("first.txt");
 
-        super::unstage_paths_in_repo(
-            fixture.repo(),
-            &[std::path::PathBuf::from("first.txt")],
-        )
-        .unwrap();
+        super::unstage_paths_in_repo(fixture.repo(), &[std::path::PathBuf::from("first.txt")])
+            .unwrap();
 
         assert!(fixture.repo().index().unwrap().is_empty());
         assert!(fixture.path().join("first.txt").exists());
@@ -8776,7 +8801,11 @@ mod tests {
     // -------------------------------------------------------------------------
 
     fn blob_text<'a>(repo: &'a git2::Repository, tree: &git2::Tree<'a>, path: &str) -> String {
-        let object = tree.get_path(std::path::Path::new(path)).unwrap().to_object(repo).unwrap();
+        let object = tree
+            .get_path(std::path::Path::new(path))
+            .unwrap()
+            .to_object(repo)
+            .unwrap();
         String::from_utf8(object.as_blob().unwrap().content().to_vec()).unwrap()
     }
 
@@ -8788,7 +8817,9 @@ mod tests {
         fs::write(path.join("a space.txt"), "base a").unwrap();
         fs::write(path.join("b[1].txt"), "base b").unwrap();
         assert!(run_git(path, &["add", "-A"]).status.success());
-        assert!(run_git(path, &["commit", "-m", "base files"]).status.success());
+        assert!(run_git(path, &["commit", "-m", "base files"])
+            .status
+            .success());
 
         fs::write(path.join("a space.txt"), "staged a").unwrap();
         fs::write(path.join("b[1].txt"), "staged b").unwrap();
@@ -8822,7 +8853,9 @@ mod tests {
         fs::write(path.join("pick[1].txt"), "base pick").unwrap();
         fs::write(path.join("keep.txt"), "base keep").unwrap();
         assert!(run_git(path, &["add", "-A"]).status.success());
-        assert!(run_git(path, &["commit", "-m", "base files"]).status.success());
+        assert!(run_git(path, &["commit", "-m", "base files"])
+            .status
+            .success());
 
         fs::write(path.join("pick[1].txt"), "new pick").unwrap();
         fs::write(path.join("keep.txt"), "new keep").unwrap();
@@ -8842,7 +8875,9 @@ mod tests {
         let tree = repo.find_tree(tree_oid).unwrap();
         let sig = repo.signature().unwrap();
         let head = repo.head().unwrap().peel_to_commit().unwrap();
-        let new_oid = repo.commit(Some("HEAD"), &sig, &sig, "selected", &tree, &[&head]).unwrap();
+        let new_oid = repo
+            .commit(Some("HEAD"), &sig, &sig, "selected", &tree, &[&head])
+            .unwrap();
         super::reconcile_committed_index_paths(path, &[selected[0].path.clone()]).unwrap();
 
         let updated = repo.find_commit(new_oid).unwrap();
@@ -8908,7 +8943,11 @@ mod tests {
         let tree = repo.find_tree(tree_oid).unwrap();
         assert!(tree.get_name("included.txt").is_some());
         assert!(tree.get_name("external.txt").is_none());
-        assert!(repo.index().unwrap().get_path(std::path::Path::new("external.txt"), 0).is_some());
+        assert!(repo
+            .index()
+            .unwrap()
+            .get_path(std::path::Path::new("external.txt"), 0)
+            .is_some());
     }
 
     #[test]
@@ -8928,7 +8967,11 @@ mod tests {
             false,
         )
         .unwrap();
-        assert!(repo.find_tree(tree_oid).unwrap().get_name("new.txt").is_some());
+        assert!(repo
+            .find_tree(tree_oid)
+            .unwrap()
+            .get_name("new.txt")
+            .is_some());
         assert!(repo.index().unwrap().is_empty());
     }
 

@@ -1,6 +1,6 @@
 use gpui::prelude::*;
 use gpui::{div, px, ClickEvent, Context, EventEmitter, FocusHandle, Render, SharedString, Window};
-use rgitui_git::RepoState;
+use rgitui_git::{PullPreview, RepoState};
 use rgitui_i18n::t;
 use rgitui_theme::{ActiveTheme, Color, StyledExt};
 use rgitui_ui::{Button, ButtonSize, ButtonStyle, Icon, IconName, IconSize, Label, LabelSize};
@@ -11,6 +11,7 @@ use crate::CommandId;
 /// The action that was confirmed (so the workspace knows what to do).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConfirmAction {
+    PullPreview(PullPreview),
     DiscardFile(String),
     DiscardFiles(Vec<String>),
     DiscardAll,
@@ -121,6 +122,7 @@ impl ConfirmDialog {
     fn severity_icon(&self) -> IconName {
         match &self.action {
             Some(ConfirmAction::ForcePush) => IconName::AlertTriangle,
+            Some(ConfirmAction::PullPreview(_)) => IconName::GitPullRequest,
             Some(_) => IconName::Trash,
             None => IconName::Check,
         }
@@ -137,6 +139,7 @@ impl ConfirmDialog {
     /// The confirm button's label for `action`, in the active language.
     fn confirm_label(action: &Option<ConfirmAction>) -> SharedString {
         match action {
+            Some(ConfirmAction::PullPreview(_)) => t!("toolbar.pull"),
             Some(
                 ConfirmAction::DiscardFile(_)
                 | ConfirmAction::DiscardFiles(_)
@@ -164,6 +167,25 @@ impl ConfirmDialog {
     /// The title and warning for `action`, in the active language.
     fn text(action: &ConfirmAction) -> (SharedString, SharedString) {
         match action {
+            ConfirmAction::PullPreview(preview) => (
+                t!("confirm.title.pull_preview"),
+                t!(
+                    "confirm.body.pull_preview",
+                    remote = &preview.remote,
+                    branch = &preview.branch,
+                    incoming = preview.incoming_commits,
+                    outgoing = preview.outgoing_commits,
+                    files = preview.changed_files.len(),
+                    conflicts = preview.conflict_files.len(),
+                    local_changes = if preview.has_local_changes {
+                        t!("confirm.pull_preview.local_changes")
+                    } else {
+                        t!("confirm.pull_preview.clean")
+                    },
+                    changed_paths = summarize_paths(&preview.changed_files),
+                    conflict_paths = summarize_paths(&preview.conflict_files)
+                ),
+            ),
             ConfirmAction::DiscardFile(path) => (
                 t!("confirm.title.discard_file"),
                 t!("confirm.body.discard_file", path = path),
@@ -254,6 +276,19 @@ impl ConfirmDialog {
 /// A commit id cut to the seven characters the graph shows.
 fn short_target(target: &str) -> &str {
     target.get(..7).unwrap_or(target)
+}
+
+fn summarize_paths(paths: &[std::path::PathBuf]) -> String {
+    const LIMIT: usize = 8;
+    let mut summary = paths
+        .iter()
+        .take(LIMIT)
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    if paths.len() > LIMIT {
+        summary.push(format!("… +{}", paths.len() - LIMIT));
+    }
+    summary.join("\n")
 }
 
 fn abort_title(state: RepoState) -> SharedString {

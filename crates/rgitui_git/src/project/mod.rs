@@ -136,7 +136,8 @@ fn english_messages_env(
 pub use bisect::{compute_bisect_log, is_bisect_in_progress, BisectDecision, BisectLogEntry};
 pub use blame::{compute_blame, BlameEntry, BlameLine};
 pub use diff::{
-    compute_commit_diff, compute_commit_file_diff, compute_commit_file_list, compute_compare_diff, compute_file_diff, compute_staged_diff_text, compute_stash_diff,
+    compute_commit_diff, compute_commit_file_diff, compute_commit_file_list, compute_compare_diff,
+    compute_file_diff, compute_staged_diff_text, compute_stash_diff,
     compute_three_way_conflict_diff,
 };
 pub use file_history::{compute_file_history, compute_file_history_at};
@@ -323,7 +324,10 @@ fn remote_tracking_branch_parts(repo: &Repository, name: &str) -> Result<(String
             return Ok((remote, branch.to_string()));
         }
     }
-    anyhow::bail!("Remote branch '{}' does not match a configured remote", name)
+    anyhow::bail!(
+        "Remote branch '{}' does not match a configured remote",
+        name
+    )
 }
 
 /// All the data gathered during a refresh, designed to be Send so it can
@@ -607,6 +611,7 @@ impl GitProject {
             branch_name,
             worktree_path: None,
             retryable: false,
+            failure_kind: None,
         }));
         cx.notify();
         id
@@ -651,6 +656,7 @@ impl GitProject {
             branch_name: names.2,
             worktree_path: self.operation_worktree(id),
             retryable: false,
+            failure_kind: None,
         }));
     }
 
@@ -661,6 +667,19 @@ impl GitProject {
         summary: Message,
         error: Message,
         names: (Option<String>, Option<String>, bool),
+        cx: &mut Context<Self>,
+    ) {
+        self.fail_op_with_kind(id, kind, summary, error, names, None, cx);
+    }
+
+    pub(crate) fn fail_op_with_kind(
+        &self,
+        id: u64,
+        kind: GitOperationKind,
+        summary: Message,
+        error: Message,
+        names: (Option<String>, Option<String>, bool),
+        failure_kind: Option<GitOperationFailureKind>,
         cx: &mut Context<Self>,
     ) {
         self.refresh_caches.finish_operation();
@@ -674,6 +693,7 @@ impl GitProject {
             branch_name: names.1,
             worktree_path: self.operation_worktree(id),
             retryable: names.2,
+            failure_kind,
         }));
     }
 

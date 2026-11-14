@@ -267,6 +267,9 @@ pub struct AppSettings {
     pub auto_fetch_interval: AutoFetchInterval,
     #[serde(default = "default_confirm_destructive")]
     pub confirm_destructive_operations: bool,
+    /// Integrate a remote update automatically after a rejected normal push.
+    #[serde(default = "default_auto_pull_on_push_rejection")]
+    pub auto_pull_on_push_rejection: bool,
     #[serde(default = "default_auto_check_updates")]
     pub auto_check_updates: bool,
     /// Timestamp of the most recent successful GitHub release check. Used to
@@ -351,6 +354,10 @@ fn default_graph_column_max_width() -> f32 {
 }
 
 fn default_confirm_destructive() -> bool {
+    true
+}
+
+fn default_auto_pull_on_push_rejection() -> bool {
     true
 }
 
@@ -823,6 +830,7 @@ impl Default for AppSettings {
             graph_column_max_width: default_graph_column_max_width(),
             auto_fetch_interval: AutoFetchInterval::default(),
             confirm_destructive_operations: default_confirm_destructive(),
+            auto_pull_on_push_rejection: default_auto_pull_on_push_rejection(),
             auto_check_updates: default_auto_check_updates(),
             last_update_check_at: None,
             commit_limit: default_commit_limit(),

@@ -130,9 +130,10 @@ impl WorktreeStatusCache {
 
     fn mark_dirty(&mut self, path: &Path) -> bool {
         let generation = self.generations.entry(path.to_path_buf()).or_default();
-        let was_clean = self.entries.get(path).map_or(*generation == 0, |entry| {
-            entry.generation == *generation
-        });
+        let was_clean = self
+            .entries
+            .get(path)
+            .map_or(*generation == 0, |entry| entry.generation == *generation);
         *generation = generation.wrapping_add(1);
         was_clean
     }
@@ -289,11 +290,11 @@ impl RefreshCaches {
     }
 
     pub(super) fn finish_operation(&self) {
-        let _ = self.active_operations.fetch_update(
-            Ordering::AcqRel,
-            Ordering::Acquire,
-            |count| Some(count.saturating_sub(1)),
-        );
+        let _ = self
+            .active_operations
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                Some(count.saturating_sub(1))
+            });
     }
 
     pub(super) fn has_active_operations(&self) -> bool {
@@ -895,15 +896,16 @@ fn compute_working_tree_status(
     // second caller reuse the first caller's completed status immediately.
     let scan_lock = cache.map(|cache| {
         let mut guard = cache.lock().unwrap_or_else(|error| error.into_inner());
-        guard.scan_locks
+        guard
+            .scan_locks
             .entry(repo_path.to_path_buf())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     });
     let wait_started = std::time::Instant::now();
-    let _single_flight = scan_lock.as_ref().map(|lock| {
-        lock.lock().unwrap_or_else(|error| error.into_inner())
-    });
+    let _single_flight = scan_lock
+        .as_ref()
+        .map(|lock| lock.lock().unwrap_or_else(|error| error.into_inner()));
     if scan_lock.is_some() && wait_started.elapsed() > std::time::Duration::from_millis(10) {
         log::info!(
             "worktree status single-flight wait: path={} wait={:?}",
@@ -1133,16 +1135,13 @@ fn compute_working_tree_status(
 
     let convert_elapsed = convert_started.elapsed();
     if let (Some(fp), Some(cache), Some(generation)) = (fingerprint, cache, cache_generation) {
-        cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(
-                repo_path.to_path_buf(),
-                generation,
-                line_stats,
-                fp,
-                wt_status.clone(),
-            );
+        cache.lock().unwrap_or_else(|e| e.into_inner()).insert(
+            repo_path.to_path_buf(),
+            generation,
+            line_stats,
+            fp,
+            wt_status.clone(),
+        );
     }
 
     log::info!(
@@ -1402,9 +1401,8 @@ fn gather_refresh_data_internal(
     );
     let status_started = std::time::Instant::now();
     let (status, stashes, worktrees) = std::thread::scope(|s| {
-        let status_handle = s.spawn(|| {
-            compute_working_tree_status(repo_path, worktree_cache, current_line_stats)
-        });
+        let status_handle =
+            s.spawn(|| compute_working_tree_status(repo_path, worktree_cache, current_line_stats));
 
         let stash_handle = s.spawn(|| {
             let stash_started = std::time::Instant::now();
@@ -1471,11 +1469,7 @@ fn gather_refresh_data_internal(
             worktree_status_handles.push((
                 idx,
                 s.spawn(move || {
-                    compute_working_tree_status(
-                        &worktree_path,
-                        worktree_cache,
-                        worktree_line_stats,
-                    )
+                    compute_working_tree_status(&worktree_path, worktree_cache, worktree_line_stats)
                 }),
             ));
         }
@@ -1614,16 +1608,26 @@ pub fn list_untracked_files_at(repo_path: &Path, directory: &Path) -> Result<Vec
     use std::path::Component;
 
     if directory.is_absolute()
-        || directory
-            .components()
-            .any(|component| matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
+        || directory.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
     {
         anyhow::bail!("Untracked directory must be a repository-relative path");
     }
 
     let output = git_command()
         .current_dir(repo_path)
-        .args(["--literal-pathspecs", "ls-files", "--others", "--exclude-standard", "-z", "--"])
+        .args([
+            "--literal-pathspecs",
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+        ])
         .arg(directory)
         .output()
         .with_context(|| "Failed to enumerate untracked directory contents")?;
@@ -1785,7 +1789,11 @@ fn compute_deferred_stats(
                 if target.worktree != priority_worktree {
                     return Vec::new();
                 }
-                paths.iter().filter(|path| priority_paths.contains(path)).cloned().collect()
+                paths
+                    .iter()
+                    .filter(|path| priority_paths.contains(path))
+                    .cloned()
+                    .collect()
             } else {
                 paths.to_vec()
             }
@@ -1797,7 +1805,10 @@ fn compute_deferred_stats(
         }
         let started = std::time::Instant::now();
         let Ok(repo) = Repository::open(&target.worktree) else {
-            log::warn!("deferred line stats: cannot open {}", target.worktree.display());
+            log::warn!(
+                "deferred line stats: cannot open {}",
+                target.worktree.display()
+            );
             continue;
         };
         let staged_stats = if staged.is_empty() {
@@ -1817,7 +1828,11 @@ fn compute_deferred_stats(
         log::info!(
             "deferred line stats timing: path={} phase={} files={} duration={:?}",
             target.worktree.display(),
-            if only_priority { "visible" } else { "remaining" },
+            if only_priority {
+                "visible"
+            } else {
+                "remaining"
+            },
             staged.len() + unstaged.len(),
             started.elapsed(),
         );
@@ -1865,8 +1880,11 @@ impl GitProject {
         }
         let generation = self.refresh_generation;
         let scheduled = generation.wrapping_add(1);
-        if self.refresh_caches.line_stats_queued_generation
-            .swap(scheduled, Ordering::AcqRel) == scheduled
+        if self
+            .refresh_caches
+            .line_stats_queued_generation
+            .swap(scheduled, Ordering::AcqRel)
+            == scheduled
         {
             return;
         }
@@ -1875,7 +1893,11 @@ impl GitProject {
         let make_target = |path: PathBuf, status: &WorkingTreeStatus| DeferredLineStatTarget {
             worktree: path,
             staged_paths: status.staged.iter().map(|file| file.path.clone()).collect(),
-            unstaged_paths: status.unstaged.iter().map(|file| file.path.clone()).collect(),
+            unstaged_paths: status
+                .unstaged
+                .iter()
+                .map(|file| file.path.clone())
+                .collect(),
         };
         // Compute line counts only for the checkout currently inspected by
         // this tab. Background worktrees must never consume CPU and disk IO
@@ -1883,7 +1905,8 @@ impl GitProject {
         let displayed_status = if priority_worktree == self.repo_path {
             Some(self.status.as_ref())
         } else {
-            self.worktrees.iter()
+            self.worktrees
+                .iter()
                 .find(|worktree| worktree.path == priority_worktree)
                 .and_then(|worktree| worktree.status.as_ref())
         };
@@ -1899,12 +1922,13 @@ impl GitProject {
         // counts are already complete. Do not re-run expensive diffs for
         // every unrelated refs or UI notification.
         let stats_ready = {
-            let cache = self.refresh_caches.worktree_status
+            let cache = self
+                .refresh_caches
+                .worktree_status
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
             cache.entries.get(&priority_worktree).is_some_and(|entry| {
-                entry.line_stats_ready
-                    && entry.generation == cache.generation(&priority_worktree)
+                entry.line_stats_ready && entry.generation == cache.generation(&priority_worktree)
             })
         };
         if stats_ready {
@@ -1923,11 +1947,12 @@ impl GitProject {
                 let first_targets = targets.clone();
                 let first_worktree = priority_worktree.clone();
                 let first_paths = priority_paths.clone();
-                let first = cx.background_executor().spawn(async move {
-                    compute_deferred_stats(
-                        &first_targets, &first_worktree, &first_paths, true,
-                    )
-                }).await;
+                let first = cx
+                    .background_executor()
+                    .spawn(async move {
+                        compute_deferred_stats(&first_targets, &first_worktree, &first_paths, true)
+                    })
+                    .await;
                 let _ = cx.update(|cx| {
                     this.update(cx, |project, cx| {
                         if project.refresh_generation != generation
@@ -1942,9 +1967,12 @@ impl GitProject {
                     })
                 });
             }
-            let remaining = cx.background_executor().spawn(async move {
-                compute_deferred_stats(&targets, &priority_worktree, &[], false)
-            }).await;
+            let remaining = cx
+                .background_executor()
+                .spawn(
+                    async move { compute_deferred_stats(&targets, &priority_worktree, &[], false) },
+                )
+                .await;
             let _ = cx.update(|cx| {
                 this.update(cx, |project, cx| {
                     if project.refresh_generation != generation
@@ -1961,16 +1989,15 @@ impl GitProject {
                     }
                 })
             });
-        }).detach();
+        })
+        .detach();
     }
 
     fn apply_deferred_stats(&mut self, results: &[LineStatResult], complete: bool) -> bool {
         let mut changed = false;
         for (path, staged, unstaged) in results {
             if path == &self.repo_path {
-                changed |= merge_line_stats(
-                    Arc::make_mut(&mut self.status), staged, unstaged,
-                );
+                changed |= merge_line_stats(Arc::make_mut(&mut self.status), staged, unstaged);
             }
             for wt in &mut self.worktrees {
                 if &wt.path == path {
@@ -1982,7 +2009,9 @@ impl GitProject {
             // Preserve the newly calculated line counts in the clean status
             // snapshot as well. Otherwise a lightweight status refresh would
             // reuse its old zero-count values and make the UI counters blink.
-            let mut cache = self.refresh_caches.worktree_status
+            let mut cache = self
+                .refresh_caches
+                .worktree_status
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
             if let Some(entry) = cache.entries.get_mut(path) {
@@ -1994,7 +2023,6 @@ impl GitProject {
         }
         changed
     }
-
 
     /// Refresh all state asynchronously on a background thread.
     /// Uses two-phase loading: the first batch of commits loads quickly so the
@@ -3266,8 +3294,16 @@ mod working_tree_status_tests {
         let inactive = Path::new("repo/worktrees/inactive");
 
         assert!(!should_scan_worktree_status(false, None, inactive));
-        assert!(should_scan_worktree_status(false, Some(inspected), inspected));
-        assert!(!should_scan_worktree_status(false, Some(inspected), inactive));
+        assert!(should_scan_worktree_status(
+            false,
+            Some(inspected),
+            inspected
+        ));
+        assert!(!should_scan_worktree_status(
+            false,
+            Some(inspected),
+            inactive
+        ));
         assert!(should_scan_worktree_status(true, None, inactive));
     }
 
@@ -3302,7 +3338,9 @@ mod working_tree_status_tests {
 
         let expanded = list_untracked_files_at(fixture.path(), Path::new("assets")).unwrap();
         assert_eq!(expanded.len(), 2);
-        assert!(expanded.iter().all(|file| file.kind == FileChangeKind::Untracked));
+        assert!(expanded
+            .iter()
+            .all(|file| file.kind == FileChangeKind::Untracked));
     }
 
     #[test]
@@ -3464,7 +3502,10 @@ mod commit_log_reuse_tests {
         repo.write_file("edited.txt", "changed\n");
 
         let refreshed = gather(&repo, &caches, 10);
-        assert!(Arc::ptr_eq(&initial.recent_commits, &refreshed.recent_commits));
+        assert!(Arc::ptr_eq(
+            &initial.recent_commits,
+            &refreshed.recent_commits
+        ));
         assert_eq!(refreshed.status.unstaged.len(), 1);
     }
 
@@ -3537,12 +3578,10 @@ mod commit_log_reuse_tests {
         // Share only a path and the cache across threads, never a git2
         // Repository handle.
         let (first, second) = std::thread::scope(|scope| {
-            let a = scope.spawn(|| {
-                compute_working_tree_status(&path, Some(&cache), false).unwrap()
-            });
-            let b = scope.spawn(|| {
-                compute_working_tree_status(&path, Some(&cache), false).unwrap()
-            });
+            let a =
+                scope.spawn(|| compute_working_tree_status(&path, Some(&cache), false).unwrap());
+            let b =
+                scope.spawn(|| compute_working_tree_status(&path, Some(&cache), false).unwrap());
             (a.join().unwrap(), b.join().unwrap())
         });
         assert_eq!(first, second);
@@ -3659,9 +3698,8 @@ mod commit_log_reuse_tests {
         let mut shown = initial.recent_commits;
         let cursor = shown.last().map(|c| c.oid);
         let tips = vec![(repo.head_oid(), false, "main".to_string())];
-        let (more, has_more) = load_more_commits_from_repo(
-            repo.path(), 2, cursor, 3, &tips, &[], None
-        ).unwrap();
+        let (more, has_more) =
+            load_more_commits_from_repo(repo.path(), 2, cursor, 3, &tips, &[], None).unwrap();
         Arc::make_mut(&mut shown).extend(more);
         caches.seed_loaded_history(repo.repo(), 5, None, &shown, has_more);
         let next = gather(&repo, &caches, 5);

@@ -602,7 +602,11 @@ fn parse_single_patch(patch: &mut git2::Patch) -> Result<FileDiff> {
         additions,
         deletions,
         kind,
-        size_bytes: patch.delta().new_file().size().max(patch.delta().old_file().size()),
+        size_bytes: patch
+            .delta()
+            .new_file()
+            .size()
+            .max(patch.delta().old_file().size()),
         is_binary: patch.delta().flags().is_binary(),
     })
 }

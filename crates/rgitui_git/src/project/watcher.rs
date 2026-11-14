@@ -236,8 +236,7 @@ impl IgnoreRepos {
     }
 
     fn owner_for_path(&self, path: &Path) -> Option<PathBuf> {
-        owning_root(self.repos.iter().map(|(root, _)| root.as_path()), path)
-            .map(Path::to_path_buf)
+        owning_root(self.repos.iter().map(|(root, _)| root.as_path()), path).map(Path::to_path_buf)
     }
 
     fn roots(&self) -> Vec<PathBuf> {
@@ -397,9 +396,10 @@ impl GitProject {
                             // object and reflog writes do not change statuses.
                             // Config/ignore files need the conservative path
                             // because they are not in that fingerprint.
-                            if paths.iter().any(|path| {
-                                git_metadata_affects_status_without_fingerprint(path)
-                            }) {
+                            if paths
+                                .iter()
+                                .any(|path| git_metadata_affects_status_without_fingerprint(path))
+                            {
                                 let roots = callback_ignore_repos
                                     .lock()
                                     .map(|repos| repos.roots())
@@ -890,21 +890,21 @@ mod tests {
 
     #[test]
     fn transient_git_metadata_does_not_force_expensive_status_rescan() {
-        assert!(!git_metadata_affects_status_without_fingerprint(
-            Path::new("/repo/.git/objects/ab/cdef")
-        ));
-        assert!(!git_metadata_affects_status_without_fingerprint(
-            Path::new("/repo/.git/index.lock")
-        ));
-        assert!(!git_metadata_affects_status_without_fingerprint(
-            Path::new("/repo/.git/logs/HEAD")
-        ));
-        assert!(git_metadata_affects_status_without_fingerprint(
-            Path::new("/repo/.git/info/exclude")
-        ));
-        assert!(git_metadata_affects_status_without_fingerprint(
-            Path::new("/repo/.git/config")
-        ));
+        assert!(!git_metadata_affects_status_without_fingerprint(Path::new(
+            "/repo/.git/objects/ab/cdef"
+        )));
+        assert!(!git_metadata_affects_status_without_fingerprint(Path::new(
+            "/repo/.git/index.lock"
+        )));
+        assert!(!git_metadata_affects_status_without_fingerprint(Path::new(
+            "/repo/.git/logs/HEAD"
+        )));
+        assert!(git_metadata_affects_status_without_fingerprint(Path::new(
+            "/repo/.git/info/exclude"
+        )));
+        assert!(git_metadata_affects_status_without_fingerprint(Path::new(
+            "/repo/.git/config"
+        )));
     }
 
     #[test]
