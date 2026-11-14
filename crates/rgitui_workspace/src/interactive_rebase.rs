@@ -179,6 +179,27 @@ impl InteractiveRebase {
         cx.notify();
     }
 
+    /// Show the dialog with one entry already in message-editing mode.
+    ///
+    /// This is used by the commit-graph "edit message" action so the dialog
+    /// opens on the requested commit instead of making the user cycle its
+    /// action manually first.
+    pub fn show_visible_reword(
+        &mut self,
+        entries: Vec<RebaseEntry>,
+        target_ref: impl Into<String>,
+        reword_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_visible(entries, target_ref, cx);
+        self.set_action_on(
+            reword_index,
+            RebaseAction::Reword(String::new()),
+            None,
+            cx,
+        );
+    }
+
     pub fn is_visible(&self) -> bool {
         self.visible
     }
@@ -476,7 +497,14 @@ impl Render for InteractiveRebase {
 
         if self.pending_focus {
             self.pending_focus = false;
-            self.focus_handle.focus(window, cx);
+            if self.editing_reword.is_some() {
+                // The graph's edit-message action should be ready for typing
+                // as soon as the dialog appears.
+                self.reword_editor
+                    .update(cx, |editor, cx| editor.focus(window, cx));
+            } else {
+                self.focus_handle.focus(window, cx);
+            }
         }
 
         let entry_count = self.entries.len();

@@ -578,6 +578,7 @@ english_messages! {
     "graph.menu.copy_sha" => "Copy SHA",
     "graph.menu.create_branch" => "Create branch here",
     "graph.menu.create_tag" => "Create tag here",
+    "graph.menu.edit_message" => "Edit commit message",
     "graph.menu.reset" => "Reset to here",
     "graph.menu.revert" => "Revert commit",
     "graph.menu.squash" => "Squash selected commits",

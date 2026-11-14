@@ -2969,59 +2969,10 @@ pub(super) fn subscribe_graph(
                     set_inspecting_worktree(this, inspecting, cx);
                 }
                 GraphViewEvent::InteractiveRebase(target_oid) => {
-                    let target = *target_oid;
-                    let commits = project.read(cx).recent_commits().to_vec();
-
-                    // Find the index of the target commit in the loaded commits list.
-                    // The interactive rebase will include all commits from HEAD (index 0)
-                    // down to and including this target.
-                    let Some(target_idx) = commits.iter().position(|c| c.oid == target) else {
-                        this.show_toast(
-                            "Selected commit not in loaded commits. Load more and try again.",
-                            ToastKind::Warning,
-                            cx,
-                        );
-                        return;
-                    };
-
-                    // Build the entry list from HEAD down to (and including) the target.
-                    // The interactive rebase editor will rebasing onto the parent of the
-                    // first entry (i.e., commits[0]..=commits[target_idx]).
-                    let head_branch = project.read(cx).head_branch().unwrap_or("HEAD").to_string();
-                    let base_short = if target_idx > 0 {
-                        commits
-                            .get(target_idx)
-                            .map(|c| c.short_id.as_str())
-                            .unwrap_or("HEAD")
-                            .to_string()
-                    } else {
-                        head_branch.clone()
-                    };
-
-                    let entries: Vec<crate::interactive_rebase::RebaseEntry> = commits
-                        [..=target_idx]
-                        .iter()
-                        .map(|c| crate::interactive_rebase::RebaseEntry {
-                            oid: c.oid.to_string(),
-                            original_message: c.summary.clone(),
-                            author: c.author.name.clone(),
-                            action: crate::interactive_rebase::RebaseAction::Pick,
-                        })
-                        .collect();
-
-                    if entries.is_empty() {
-                        this.show_toast(
-                            "No commits available for interactive rebase.",
-                            ToastKind::Warning,
-                            cx,
-                        );
-                        return;
-                    }
-
-                    // Use the base short oid as the "onto" target ref in the dialog.
-                    this.overlays.interactive_rebase.update(cx, |ir, cx| {
-                        ir.show_visible(entries, format!("{} (rebase onto)", base_short), cx);
-                    });
+                    open_rebase_for_commit(this, &project, *target_oid, false, cx);
+                }
+                GraphViewEvent::EditCommitMessage(target_oid) => {
+                    open_rebase_for_commit(this, &project, *target_oid, true, cx);
                 }
                 // The context-menu route to squashing. It lands on the same
                 // helper as the `graph::SquashSelected` keystroke, so the
@@ -3031,6 +2982,65 @@ pub(super) fn subscribe_graph(
         }
     })
     .detach();
+}
+
+/// Build the contiguous HEAD-to-target rebase plan used by graph actions.
+///
+/// Message editing is the same history rewrite as interactive rebase, with the
+/// selected entry pre-set to `Reword` so the user can correct it immediately.
+fn open_rebase_for_commit(
+    workspace: &mut Workspace,
+    project: &Entity<GitProject>,
+    target: git2::Oid,
+    edit_message: bool,
+    cx: &mut Context<Workspace>,
+) {
+    let commits = project.read(cx).recent_commits().to_vec();
+    let Some(target_idx) = commits.iter().position(|commit| commit.oid == target) else {
+        workspace.show_toast(
+            "Selected commit not in loaded commits. Load more and try again.",
+            ToastKind::Warning,
+            cx,
+        );
+        return;
+    };
+
+    let head_branch = project.read(cx).head_branch().unwrap_or("HEAD").to_string();
+    let base_short = if target_idx > 0 {
+        commits
+            .get(target_idx)
+            .map(|commit| commit.short_id.as_str())
+            .unwrap_or("HEAD")
+            .to_string()
+    } else {
+        head_branch.clone()
+    };
+    let entries: Vec<crate::interactive_rebase::RebaseEntry> = commits[..=target_idx]
+        .iter()
+        .map(|commit| crate::interactive_rebase::RebaseEntry {
+            oid: commit.oid.to_string(),
+            original_message: commit.summary.clone(),
+            author: commit.author.name.clone(),
+            action: crate::interactive_rebase::RebaseAction::Pick,
+        })
+        .collect();
+
+    if entries.is_empty() {
+        workspace.show_toast(
+            "No commits available for interactive rebase.",
+            ToastKind::Warning,
+            cx,
+        );
+        return;
+    }
+
+    workspace.overlays.interactive_rebase.update(cx, |dialog, cx| {
+        if edit_message {
+            dialog.show_visible_reword(entries, format!("{} (rebase onto)", base_short), target_idx, cx);
+        } else {
+            dialog.show_visible(entries, format!("{} (rebase onto)", base_short), cx);
+        }
+    });
 }
 
 pub(super) fn subscribe_detail_panel(

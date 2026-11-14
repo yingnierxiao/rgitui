@@ -511,6 +511,7 @@
     "graph.menu.copy_sha": "复制 SHA",
     "graph.menu.create_branch": "在此创建分支",
     "graph.menu.create_tag": "在此创建标签",
+    "graph.menu.edit_message": "修改提交日志",
     "graph.menu.reset": "重置到此处",
     "graph.menu.revert": "还原提交",
     "graph.menu.squash": "压缩所选提交",

@@ -353,6 +353,7 @@ enum GraphMenuAction {
     BisectBad,
     Reset,
     InteractiveRebase,
+    EditCommitMessage,
     SquashSelected,
     CopySha,
     CopyMessage,
@@ -464,6 +465,11 @@ const GRAPH_MENU_ITEMS: &[GraphMenuItem] = &[
         GraphMenuAction::SquashSelected,
     ),
     GraphMenuItem::new(
+        key!("graph.menu.edit_message"),
+        IconName::Edit,
+        GraphMenuAction::EditCommitMessage,
+    ),
+    GraphMenuItem::new(
         key!("graph.menu.copy_sha"),
         IconName::Copy,
         GraphMenuAction::CopySha,
@@ -570,6 +576,8 @@ pub enum GraphViewEvent {
     /// interactive rebase editor, allowing the user to reorder, squash, fixup,
     /// reword, or drop them.
     InteractiveRebase(git2::Oid),
+    /// Open interactive rebase with the selected commit ready for message editing.
+    EditCommitMessage(git2::Oid),
     /// Squash the selected commits together. The workspace validates the
     /// selection and pre-fills the interactive rebase dialog, or explains why it
     /// cannot — the same path the `graph::SquashSelected` keystroke takes, so the
@@ -1513,6 +1521,7 @@ impl GraphView {
             GraphMenuAction::BisectBad => GraphViewEvent::BisectBad(oid),
             GraphMenuAction::Reset => GraphViewEvent::ResetToCommit(oid),
             GraphMenuAction::InteractiveRebase => GraphViewEvent::InteractiveRebase(oid),
+            GraphMenuAction::EditCommitMessage => GraphViewEvent::EditCommitMessage(oid),
             GraphMenuAction::SquashSelected => GraphViewEvent::SquashSelected,
             GraphMenuAction::CopySha => GraphViewEvent::CopyCommitSha(oid.to_string()),
             GraphMenuAction::CopyMessage => {
@@ -3638,7 +3647,12 @@ impl Render for GraphView {
                     // Prevent hover from leaking through to graph rows
                     .on_mouse_move(|_: &MouseMoveEvent, _: &mut Window, cx: &mut App| {
                         cx.stop_propagation();
-                    });
+                    })
+                    // GPUI dispatches this listener for presses outside the
+                    // menu's hitbox, including clicks in other workspace panels.
+                    .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                        this.dismiss_context_menu(cx);
+                    }));
 
                 for (idx, item) in items.iter().enumerate() {
                     if item.separator_before {
