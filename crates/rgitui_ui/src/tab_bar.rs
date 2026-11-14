@@ -66,13 +66,16 @@ impl RenderOnce for Tab {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let colors = cx.colors();
         let bg = if self.active {
-            colors.tab_active_background
+            gpui::Hsla {
+                a: 0.18,
+                ..colors.text_accent
+            }
         } else {
             colors.tab_inactive_background
         };
 
         let label_color = if self.active {
-            Color::Default
+            Color::Accent
         } else {
             Color::Muted
         };
@@ -94,7 +97,7 @@ impl RenderOnce for Tab {
             .active(move |s| s.bg(active_bg));
 
         if self.active {
-            tab = tab.border_b_2().border_color(colors.text_accent);
+            tab = tab.border_t_2().border_color(colors.text_accent);
         }
 
         if let Some(on_click) = self.on_click {

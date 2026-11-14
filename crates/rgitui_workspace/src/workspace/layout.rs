@@ -1269,6 +1269,10 @@ impl Render for Workspace {
                                 let ws_issues = cx.entity().downgrade();
                                 let ws_prs = cx.entity().downgrade();
                                 let ws_bh = cx.entity().downgrade();
+                                let active_tab_bg = gpui::Hsla {
+                                    a: 0.18,
+                                    ..colors.text_accent
+                                };
                                 div()
                                     .h_flex()
                                     .w_full()
@@ -1287,7 +1291,9 @@ impl Render for Workspace {
                                             .items_center()
                                             .cursor_pointer()
                                             .when(is_details, |el| {
-                                                el.border_b_2().border_color(colors.text_accent)
+                                                el.bg(active_tab_bg)
+                                                    .border_t_2()
+                                                    .border_color(colors.text_accent)
                                             })
                                             .hover(|s| s.bg(colors.ghost_element_hover))
                                             .on_click(move |_: &ClickEvent, _, cx| {
@@ -1302,7 +1308,7 @@ impl Render for Workspace {
                                                     .size(LabelSize::XSmall)
                                                     .weight(gpui::FontWeight::SEMIBOLD)
                                                     .color(if is_details {
-                                                        Color::Default
+                                                        Color::Accent
                                                     } else {
                                                         Color::Muted
                                                     }),
@@ -1319,7 +1325,9 @@ impl Render for Workspace {
                                             .items_center()
                                             .cursor_pointer()
                                             .when(is_history, |el| {
-                                                el.border_b_2().border_color(colors.text_accent)
+                                                el.bg(active_tab_bg)
+                                                    .border_t_2()
+                                                    .border_color(colors.text_accent)
                                             })
                                             .hover(|s| s.bg(colors.ghost_element_hover))
                                             .on_click(move |_: &ClickEvent, _, cx| {
@@ -1334,7 +1342,7 @@ impl Render for Workspace {
                                                     .size(LabelSize::XSmall)
                                                     .weight(gpui::FontWeight::SEMIBOLD)
                                                     .color(if is_history {
-                                                        Color::Default
+                                                        Color::Accent
                                                     } else {
                                                         Color::Muted
                                                     }),
@@ -1349,7 +1357,9 @@ impl Render for Workspace {
                                             .items_center()
                                             .cursor_pointer()
                                             .when(is_issues, |el| {
-                                                el.border_b_2().border_color(colors.text_accent)
+                                                el.bg(active_tab_bg)
+                                                    .border_t_2()
+                                                    .border_color(colors.text_accent)
                                             })
                                             .hover(|s| s.bg(colors.ghost_element_hover))
                                             .on_click(move |_: &ClickEvent, _, cx| {
@@ -1378,7 +1388,7 @@ impl Render for Workspace {
                                                     .size(LabelSize::XSmall)
                                                     .weight(gpui::FontWeight::SEMIBOLD)
                                                     .color(if is_issues {
-                                                        Color::Default
+                                                        Color::Accent
                                                     } else {
                                                         Color::Muted
                                                     }),
@@ -1393,7 +1403,9 @@ impl Render for Workspace {
                                             .items_center()
                                             .cursor_pointer()
                                             .when(is_prs, |el| {
-                                                el.border_b_2().border_color(colors.text_accent)
+                                                el.bg(active_tab_bg)
+                                                    .border_t_2()
+                                                    .border_color(colors.text_accent)
                                             })
                                             .hover(|s| s.bg(colors.ghost_element_hover))
                                             .on_click(move |_: &ClickEvent, _, cx| {
@@ -1422,7 +1434,7 @@ impl Render for Workspace {
                                                     .size(LabelSize::XSmall)
                                                     .weight(gpui::FontWeight::SEMIBOLD)
                                                     .color(if is_prs {
-                                                        Color::Default
+                                                        Color::Accent
                                                     } else {
                                                         Color::Muted
                                                     }),
@@ -1437,7 +1449,9 @@ impl Render for Workspace {
                                             .items_center()
                                             .cursor_pointer()
                                             .when(is_bh, |el| {
-                                                el.border_b_2().border_color(colors.text_accent)
+                                                el.bg(active_tab_bg)
+                                                    .border_t_2()
+                                                    .border_color(colors.text_accent)
                                             })
                                             .hover(|s| s.bg(colors.ghost_element_hover))
                                             .on_click(move |_: &ClickEvent, _, cx| {
@@ -1458,7 +1472,7 @@ impl Render for Workspace {
                                                     .size(LabelSize::XSmall)
                                                     .weight(gpui::FontWeight::SEMIBOLD)
                                                     .color(if is_bh {
-                                                        Color::Default
+                                                        Color::Accent
                                                     } else {
                                                         Color::Muted
                                                     }),
