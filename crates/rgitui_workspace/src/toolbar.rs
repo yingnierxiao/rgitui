@@ -435,7 +435,7 @@ impl Toolbar {
     }
 
     fn render_right_group(&mut self, cx: &mut Context<Self>) -> gpui::Div {
-        div()
+        let mut group = div()
             .h_flex()
             .items_center()
             .gap(px(2.))
@@ -510,7 +510,40 @@ impl Toolbar {
                                 cx.emit(ToolbarEvent::Settings)
                             })),
                     ),
-            )
+            );
+
+        if let Some(key) = keymap::shortcut(CommandId::CommandPalette, cx) {
+            let hint_bg = cx.colors().ghost_element_hover;
+            group = group.child(VerticalDivider::new()).child(
+                div()
+                    .h_flex()
+                    .gap(px(4.))
+                    .items_center()
+                    .px(px(4.))
+                    .child(
+                        div()
+                            .h(px(16.))
+                            .px(px(4.))
+                            .rounded(px(3.))
+                            .bg(hint_bg)
+                            .flex()
+                            .items_center()
+                            .child(
+                                Label::new(SharedString::from(key))
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted)
+                                    .weight(gpui::FontWeight::MEDIUM),
+                            ),
+                    )
+                    .child(
+                        Label::new("Commands")
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    ),
+            );
+        }
+
+        group
     }
 }
 
@@ -519,21 +552,19 @@ impl Render for Toolbar {
         let compactness = cx.global::<SettingsState>().settings().compactness;
         let toolbar_h = compactness.spacing(36.0);
         let toolbar_bg = cx.colors().toolbar_background;
-        let border_color = cx.colors().border_variant;
 
         let left = self.render_left_group(cx);
         let right = self.render_right_group(cx);
 
         div()
             .h_flex()
-            .w_full()
+            .flex_1()
+            .min_w_0()
             .h(px(toolbar_h))
             .px(px(8.))
             .items_center()
             .justify_between()
             .bg(toolbar_bg)
-            .border_b_1()
-            .border_color(border_color)
             .child(left)
             .child(right)
     }

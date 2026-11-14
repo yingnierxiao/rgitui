@@ -6,9 +6,6 @@ use rgitui_ui::{
     Icon, IconName, IconSize, Label, LabelSize, Tooltip, WindowControl, WindowControlType,
 };
 
-use crate::keymap;
-use crate::CommandId;
-
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
 /// The application title bar.
@@ -63,51 +60,6 @@ impl TitleBar {
             .h(px(14.))
             .rounded(px(0.5))
             .bg(colors.border_variant)
-    }
-
-    /// A `key — what it does` hint, with the keystroke read from the keymap.
-    ///
-    /// Returns nothing when the command is unbound, so removing a binding in
-    /// `keymap.json` removes the hint rather than leaving a lie in the title bar.
-    fn render_keyboard_hint(
-        colors: &rgitui_theme::ThemeColors,
-        command: CommandId,
-        label_text: &'static str,
-        cx: &App,
-    ) -> Option<gpui::Div> {
-        let key = keymap::shortcut(command, cx)?;
-        Some(Self::keyboard_hint(colors, key, label_text))
-    }
-
-    fn keyboard_hint(
-        colors: &rgitui_theme::ThemeColors,
-        key: String,
-        label_text: &'static str,
-    ) -> gpui::Div {
-        div()
-            .h_flex()
-            .gap(px(3.))
-            .items_center()
-            .child(
-                div()
-                    .h(px(16.))
-                    .px(px(4.))
-                    .rounded(px(3.))
-                    .bg(colors.ghost_element_hover)
-                    .flex()
-                    .items_center()
-                    .child(
-                        Label::new(SharedString::from(key))
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted)
-                            .weight(gpui::FontWeight::MEDIUM),
-                    ),
-            )
-            .child(
-                Label::new(label_text)
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted),
-            )
     }
 }
 
@@ -178,12 +130,10 @@ impl RenderOnce for TitleBar {
 
         let mut bar = div()
             .h_flex()
-            .w_full()
-            .h(px(34.))
-            .bg(colors.title_bar_background)
-            .border_b_1()
-            .border_color(colors.border)
-            .px(px(12.))
+            .h(px(36.))
+            .bg(colors.toolbar_background)
+            .pl(px(12.))
+            .pr(px(8.))
             .gap(px(8.))
             .items_center();
 
@@ -217,24 +167,6 @@ impl RenderOnce for TitleBar {
         }
 
         bar = bar
-            .child(
-                div()
-                    .h_flex()
-                    .gap(px(5.))
-                    .items_center()
-                    .child(
-                        Icon::new(IconName::GitCommit)
-                            .size(IconSize::Small)
-                            .color(Color::Accent),
-                    )
-                    .child(
-                        Label::new("rgitui")
-                            .size(LabelSize::Small)
-                            .color(Color::Muted)
-                            .weight(gpui::FontWeight::BOLD),
-                    ),
-            )
-            .child(Self::render_separator(&colors))
             .child(
                 div()
                     .h_flex()
@@ -278,25 +210,6 @@ impl RenderOnce for TitleBar {
             );
         }
 
-        bar = bar.child(div().flex_1());
-
-        bar.child(
-            div()
-                .h_flex()
-                .gap(px(12.))
-                .items_center()
-                .children(Self::render_keyboard_hint(
-                    &colors,
-                    CommandId::CommandPalette,
-                    "Commands",
-                    cx,
-                ))
-                .children(Self::render_keyboard_hint(
-                    &colors,
-                    CommandId::Shortcuts,
-                    "Help",
-                    cx,
-                )),
-        )
+        bar
     }
 }

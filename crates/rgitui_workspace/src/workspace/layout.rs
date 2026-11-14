@@ -568,35 +568,42 @@ impl Render for Workspace {
         let detached_head_banner =
             detached_head.map(|head| self.render_detached_head_banner(head, cx));
 
+        let title = TitleBar::new(repo_name.clone(), branch_name.clone())
+            .has_changes(has_changes)
+            .head_detached(head_detached);
+        // A detached HEAD has no branch to find in the sidebar, so its pill
+        // shows HEAD's commit in the graph instead.
+        let mut title = if detached_head_banner.is_some() {
+            title.on_branch_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.reveal_head(window, cx);
+            }))
+        } else {
+            let sidebar = active_tab.sidebar.clone();
+            title.on_branch_click(move |_, window, cx| {
+                sidebar.update(cx, |sb, cx| {
+                    sb.ensure_branches_visible(window, cx);
+                });
+            })
+        };
+        if !repo_state.is_clean() {
+            title = title.repo_state(repo_state.label().translated());
+        }
+
         let root = self.workspace_root(cx, ui_font, colors.background).v_flex();
 
         root
-            // Title bar
-            .child({
-                let title = TitleBar::new(repo_name.clone(), branch_name.clone())
-                    .has_changes(has_changes)
-                    .head_detached(head_detached);
-                // A detached HEAD has no branch to find in the sidebar, so its
-                // pill shows HEAD's commit in the graph instead.
-                let mut title = if detached_head_banner.is_some() {
-                    title.on_branch_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.reveal_head(window, cx);
-                    }))
-                } else {
-                    let sidebar = active_tab.sidebar.clone();
-                    title.on_branch_click(move |_, window, cx| {
-                        sidebar.update(cx, |sb, cx| {
-                            sb.ensure_branches_visible(window, cx);
-                        });
-                    })
-                };
-                if !repo_state.is_clean() {
-                    title = title.repo_state(repo_state.label().translated());
-                }
-                title
-            })
-            // Toolbar
-            .child(active_tab.toolbar.clone())
+            // Repository identity and actions share one toolbar row.
+            .child(
+                div()
+                    .h_flex()
+                    .w_full()
+                    .items_center()
+                    .bg(colors.toolbar_background)
+                    .border_b_1()
+                    .border_color(colors.border_variant)
+                    .child(title)
+                    .child(active_tab.toolbar.clone()),
+            )
             .when_some(update_banner, |el, banner| el.child(banner))
             // Conflict state banner (merge/rebase/cherry-pick/revert in progress)
             .when(!repo_state.is_clean(), |el| {
