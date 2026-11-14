@@ -93,6 +93,7 @@ pub enum SidebarEvent {
     StageFiles(Vec<String>),
     /// Unstage only the explicitly selected paths.
     UnstageFiles(Vec<String>),
+    IgnorePath(rgitui_git::GitIgnoreRule),
     StageAll,
     UnstageAll,
     DiscardFile(String),

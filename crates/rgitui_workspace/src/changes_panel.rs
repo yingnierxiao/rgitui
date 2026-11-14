@@ -198,6 +198,7 @@ struct ChangeContextMenuActions {
     stage: bool,
     unstage: bool,
     discard: bool,
+    ignore: bool,
 }
 
 impl ChangeContextMenuActions {
@@ -214,21 +215,56 @@ impl ChangeContextMenuActions {
             stage: !conflict && row.unstaged.is_some(),
             unstage: !conflict && row.staged.is_some(),
             discard: !conflict && can_discard_to_head(row),
+            ignore: !conflict
+                && matches!(
+                    row.kind(),
+                    FileChangeKind::Untracked | FileChangeKind::UntrackedDirectory
+                ),
         }
     }
 
-    fn height(self) -> f32 {
+    fn height(self, row: &ChangeRow) -> f32 {
+        let folders = ignore_folder_targets(row);
+        let extension_count = row
+            .path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some() as usize;
+        let ignore_count = if !self.ignore {
+            0
+        } else {
+            1 + folders.len() + extension_count
+        };
         // Open (or conflict resolver), copy path, plus the conditional actions.
         let item_count = 2
             + (self.inspect as usize) * 2
             + self.staged_diff as usize
             + self.stage as usize
             + self.unstage as usize
-            + self.discard as usize;
-        // Copy-path separator, plus separators before Stage and Discard.
-        let separator_count = 1 + self.stage as usize + self.discard as usize;
+            + self.discard as usize
+            + ignore_count;
+        // Copy-path separator, plus separators before Stage, Discard, and Ignore.
+        let separator_count =
+            1 + self.stage as usize + self.discard as usize + usize::from(ignore_count > 0);
         8.0 + item_count as f32 * 28.0 + separator_count as f32 * 9.0
     }
+}
+
+fn ignore_folder_targets(row: &ChangeRow) -> Vec<PathBuf> {
+    let mut folder = if row.kind() == FileChangeKind::UntrackedDirectory {
+        Some(row.path.as_path())
+    } else {
+        row.path.parent()
+    };
+    let mut folders = Vec::new();
+    while let Some(path) = folder {
+        if path.as_os_str().is_empty() {
+            break;
+        }
+        folders.push(path.to_path_buf());
+        folder = path.parent();
+    }
+    folders
 }
 
 fn change_matches_filter(
@@ -384,6 +420,22 @@ fn selected_virtual_paths(
         .filter(|row| selected.contains(&row.path) && !row.has_conflict())
         .map(|row| row.path.clone())
         .collect()
+}
+
+fn keyboard_checkbox_target_paths(
+    rows: &[ChangeRow],
+    visible: &[usize],
+    selected: &HashSet<PathBuf>,
+    clicked: &Path,
+) -> Vec<PathBuf> {
+    if selected.len() > 1 && selected.contains(clicked) {
+        selected_virtual_paths(rows, visible, selected)
+    } else {
+        rows.iter()
+            .find(|row| row.path == clicked && !row.has_conflict())
+            .map(|row| vec![row.path.clone()])
+            .unwrap_or_default()
+    }
 }
 
 /// Discard targets come from highlighted rows, never from commit checkboxes.
@@ -998,7 +1050,33 @@ impl ChangesPanel {
         if let Some(row_number) = self.selected_row {
             if let Some(index) = self.visible.get(row_number) {
                 let path = self.rows[*index].path.clone();
-                self.toggle_checkbox(&path, row_number, false, cx);
+                let paths = keyboard_checkbox_target_paths(
+                    &self.rows,
+                    &self.visible,
+                    &self.selected_paths,
+                    &path,
+                );
+                if paths.is_empty() {
+                    return;
+                }
+                let desired =
+                    if visual_state(&self.rows[*index], &self.overrides) == CheckState::Checked {
+                        CheckState::Unchecked
+                    } else {
+                        CheckState::Checked
+                    };
+                self.set_virtual_paths(&paths, desired, cx);
+
+                let mut selected = self.selected_paths.as_ref().clone();
+                if desired == CheckState::Checked {
+                    selected.extend(paths);
+                } else {
+                    for path in paths {
+                        selected.remove(&path);
+                    }
+                }
+                self.selected_paths = Arc::new(selected);
+                cx.notify();
             }
         }
     }
@@ -1481,7 +1559,10 @@ impl Render for ChangesPanel {
                 }
                 actions
             });
-            let menu_height = actions.map_or(0.0, ChangeContextMenuActions::height);
+            let menu_height = actions
+                .as_ref()
+                .zip(row.as_ref())
+                .map_or(0.0, |(actions, row)| actions.height(row));
             let menu_size = Size::new(px(CHANGE_CONTEXT_MENU_WIDTH), px(menu_height));
             let bounds = self.container_bounds;
             let relative_x = menu_state.position.x - bounds.origin.x;
@@ -1705,6 +1786,89 @@ impl Render for ChangesPanel {
                             ));
                         }
                     }
+
+                    if actions.ignore {
+                        let panel = weak_panel.clone();
+                        let sidebar = weak_sidebar.clone();
+                        let path = row.path.clone();
+                        menu = menu.separator().item(
+                            ContextMenuItem::new(t!("changes.menu.ignore_file")).on_click(
+                                move |_, _, cx| {
+                                    panel
+                                        .update(cx, |this, cx| {
+                                            this.context_menu = None;
+                                            cx.notify();
+                                        })
+                                        .ok();
+                                    sidebar
+                                        .update(cx, |_, cx| {
+                                            cx.emit(SidebarEvent::IgnorePath(
+                                                rgitui_git::GitIgnoreRule::File(path.clone()),
+                                            ));
+                                        })
+                                        .ok();
+                                },
+                            ),
+                        );
+
+                        for folder in ignore_folder_targets(&row) {
+                            let panel = weak_panel.clone();
+                            let sidebar = weak_sidebar.clone();
+                            let rule_path = folder.clone();
+                            let label = t!(
+                                "changes.menu.ignore_folder",
+                                folder = folder.to_string_lossy().to_string()
+                            );
+                            menu =
+                                menu.item(ContextMenuItem::new(label).on_click(move |_, _, cx| {
+                                    panel
+                                        .update(cx, |this, cx| {
+                                            this.context_menu = None;
+                                            cx.notify();
+                                        })
+                                        .ok();
+                                    sidebar
+                                        .update(cx, |_, cx| {
+                                            cx.emit(SidebarEvent::IgnorePath(
+                                                rgitui_git::GitIgnoreRule::Directory(
+                                                    rule_path.clone(),
+                                                ),
+                                            ));
+                                        })
+                                        .ok();
+                                }));
+                        }
+
+                        if let Some(extension) =
+                            row.path.extension().and_then(|value| value.to_str())
+                        {
+                            let panel = weak_panel.clone();
+                            let sidebar = weak_sidebar.clone();
+                            let extension = extension.to_string();
+                            let label = t!(
+                                "changes.menu.ignore_extension",
+                                extension = extension.clone()
+                            );
+                            menu =
+                                menu.item(ContextMenuItem::new(label).on_click(move |_, _, cx| {
+                                    panel
+                                        .update(cx, |this, cx| {
+                                            this.context_menu = None;
+                                            cx.notify();
+                                        })
+                                        .ok();
+                                    sidebar
+                                        .update(cx, |_, cx| {
+                                            cx.emit(SidebarEvent::IgnorePath(
+                                                rgitui_git::GitIgnoreRule::Extension(
+                                                    extension.clone(),
+                                                ),
+                                            ));
+                                        })
+                                        .ok();
+                                }));
+                        }
+                    }
                 }
 
                 let copy_path = menu_state.path.to_string_lossy().to_string();
@@ -1877,6 +2041,25 @@ mod tests {
     }
 
     #[test]
+    fn space_targets_every_row_in_a_non_contiguous_multi_selection() {
+        let rows = combine_changes(
+            vec![],
+            vec![
+                file("a.rs", FileChangeKind::Modified),
+                file("b.rs", FileChangeKind::Modified),
+                file("c.rs", FileChangeKind::Modified),
+            ],
+        );
+        let visible = vec![0, 1, 2];
+        let selected = HashSet::from([PathBuf::from("a.rs"), PathBuf::from("c.rs")]);
+
+        assert_eq!(
+            keyboard_checkbox_target_paths(&rows, &visible, &selected, Path::new("c.rs")),
+            vec![PathBuf::from("a.rs"), PathBuf::from("c.rs")]
+        );
+    }
+
+    #[test]
     fn selected_virtual_paths_include_only_visible_nonconflicting_rows() {
         let rows = combine_changes(
             vec![],
@@ -2025,13 +2208,14 @@ mod tests {
             unstaged: Some(file("new.rs", FileChangeKind::Untracked)),
         };
         assert!(!ChangeContextMenuActions::for_row(&untracked).inspect);
+        assert!(ChangeContextMenuActions::for_row(&untracked).ignore);
 
         let unstaged_actions = ChangeContextMenuActions::for_row(&unstaged);
         assert!(unstaged_actions.inspect);
         assert!(unstaged_actions.stage);
         assert!(unstaged_actions.discard);
         assert!(!unstaged_actions.unstage);
-        assert!(unstaged_actions.height() > 0.0);
+        assert!(unstaged_actions.height(&unstaged) > 0.0);
 
         let staged_actions = ChangeContextMenuActions::for_row(&staged);
         assert!(staged_actions.inspect);
@@ -2053,6 +2237,7 @@ mod tests {
         assert!(!conflict_actions.unstage);
         assert!(!conflict_actions.discard);
         assert!(!conflict_actions.staged_diff);
+        assert!(!conflict_actions.ignore);
     }
 
     #[test]

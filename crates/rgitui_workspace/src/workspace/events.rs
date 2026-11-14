@@ -1987,6 +1987,40 @@ pub(super) fn subscribe_sidebar(
                     });
                 }
             }
+            SidebarEvent::IgnorePath(rule) => {
+                let rule = rule.clone();
+                let worktree_path = this.effective_worktree_path(cx);
+                cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move {
+                            rgitui_git::add_gitignore_rule(&worktree_path, &rule)
+                        })
+                        .await;
+                    cx.update(|cx| {
+                        let _ = this.update(cx, |workspace, cx| match result {
+                            Ok(true) => {
+                                workspace.show_toast(
+                                    t!("changes.menu.ignore_done"),
+                                    ToastKind::Success,
+                                    cx,
+                                );
+                            }
+                            Ok(false) => workspace.show_toast(
+                                t!("changes.menu.ignore_existing"),
+                                ToastKind::Info,
+                                cx,
+                            ),
+                            Err(error) => workspace.show_toast(
+                                t!("changes.menu.ignore_failed", error = error.to_string()),
+                                ToastKind::Error,
+                                cx,
+                            ),
+                        });
+                    });
+                })
+                .detach();
+            }
             SidebarEvent::StageAll => {
                 let worktree_path = this.effective_worktree_path(cx);
                 project.update(cx, |proj, cx| {
@@ -2038,11 +2072,11 @@ pub(super) fn subscribe_sidebar(
                 }
             }
             SidebarEvent::RemoteBranchCompare(name) => {
-                let Some(current) = project.read(cx).head_branch().map(str::to_string) else {
-                    return;
-                };
                 let remote_branch = name.clone();
                 let repo_path = this.effective_worktree_path(cx);
+                let Some(current) = project.read(cx).head_branch_at(&repo_path) else {
+                    return;
+                };
                 let Some(tab) = this.tabs.get_mut(this.active_tab) else {
                     return;
                 };
@@ -2323,7 +2357,11 @@ pub(super) fn subscribe_sidebar(
             SidebarEvent::BranchCopyName(name) => {
                 let name = name.clone();
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(name.clone()));
-                this.show_toast(format!("Copied: {}", name), ToastKind::Info, cx);
+                this.show_toast(
+                    t!("sidebar.branch_copied", branch = name),
+                    ToastKind::Info,
+                    cx,
+                );
             }
             SidebarEvent::MergeBranch(name) => {
                 let name = name.clone();
